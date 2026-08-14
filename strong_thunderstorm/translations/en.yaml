@@ -49,7 +49,7 @@ configuration:
     description: Optional entity_id for the fireplace video. Must be different from the storm media player.
   fireplace_media:
     name: Fireplace media
-    description: Media-source URI or HTTP(S) video URL. Default is media-source://media_source/local/fireplace.mp4.
+    description: Media-source URI, direct HTTP(S) video URL or YouTube link. YouTube links are launched automatically through the native YouTube Cast app.
   fireplace_volume:
     name: Fireplace volume
     description: Target volume of the living-room media player in percent.
