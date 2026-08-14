@@ -1,4 +1,4 @@
-# Bako's Thunderstorm 1.3.2
+# Bako's Thunderstorm 1.3.3
 
 **Creator: Bako**
 
@@ -6,13 +6,14 @@ Home Assistant app/add-on for synchronized Zigbee2MQTT thunderstorm lighting,
 a dynamically mixed single audio stream for Cast/Nest devices, and an optional
 cozy living-room/fireplace mode.
 
-## 1.3.2 public release
+## 1.3.3 public release
 
-- Renamed all public-facing branding to **Bako's Thunderstorm**
-- Home Assistant app name, panel title, MQTT Discovery device name and docs updated
-- Storm intensity label simplified from `Original Strong` to `Original`
-- Internal slug remains `strong_thunderstorm` so existing installations update cleanly
-- Public CC0 procedural rain/thunder audio remains unchanged
-- Persistent settings and gentle session ending remain unchanged
+- Fixed fireplace playback when `fireplace_media` is a YouTube URL.
+- Common YouTube links (`youtube.com/watch`, `youtu.be`, Shorts, Live and Embed)
+  are now converted automatically to Home Assistant's native YouTube Cast payload.
+- Direct MP4, generic HTTP(S) video URLs and Home Assistant media-source URIs
+  continue to use the normal media-player path.
+- Public branding remains **Bako's Thunderstorm**.
+- Internal slug remains `strong_thunderstorm` so existing installations update cleanly.
 
 See `DOCS.md` for configuration details.
