@@ -139,7 +139,7 @@
 
             await self.broadcast_status()
             logging.info(
-                "Strong Thunderstorm started with %d lights (group=%s, audio=%s, duration=%s)",
+                "Bako's Thunderstorm started with %d lights (group=%s, audio=%s, duration=%s)",
                 len(self.session_lights),
                 self.lightning_group or "none",
                 "dynamic single Cast stream" if self.media_player_audio else ("browser" if browser_audio_effective else "none"),
