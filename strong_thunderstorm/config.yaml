@@ -1,5 +1,5 @@
 name: "Bako's Thunderstorm"
-version: "1.3.2"
+version: "1.3.3"
 slug: strong_thunderstorm
 description: >-
   Bako's Thunderstorm for Zigbee2MQTT with dynamic single-stream audio,
