@@ -167,7 +167,7 @@ async def create_app() -> web.Application:
             raise web.HTTPNotFound()
         path = MEDIA_DIR / name
         if not path.is_file():
-            raise web.HTTPNotFound(text="Bundled Strong Thunderstorm audio is unavailable.")
+            raise web.HTTPNotFound(text="Bundled Bako's Thunderstorm audio is unavailable.")
         response = web.FileResponse(path)
         response.content_type = "audio/mp4"
         return response
