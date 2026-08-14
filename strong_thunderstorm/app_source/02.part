@@ -1,0 +1,180 @@
+            tmp_path.unlink(missing_ok=True)
+
+            rain = np.memmap(self.pcm_paths["rain-heavy.m4a"], dtype="<i2", mode="r").reshape(-1, CHANNELS)
+            thunders = {
+                name: np.memmap(self.pcm_paths[name], dtype="<i2", mode="r").reshape(-1, CHANNELS)
+                for name in THUNDER_FILES
+            }
+
+            total_frames = max(1, int(round(duration_seconds * SAMPLE_RATE)))
+            rain_start_frame = int(round(rain_offset_seconds * SAMPLE_RATE))
+            rain_gain = clamp(float(rain_volume) / 100.0, 0.0, 1.0)
+            thunder_gain = clamp(float(thunder_volume) / 100.0, 0.0, 1.5)
+            fade_in_frames = int(RAIN_FADE_IN_SECONDS * SAMPLE_RATE) if initial_block else 0
+            fade_out_frames = int(max(0.0, float(fade_out_seconds)) * SAMPLE_RATE)
+
+            event_data: list[tuple[int, int, np.memmap]] = []
+            for event in timeline:
+                arr = thunders[str(event["file"])]
+                start = int(round(float(event["time"]) * SAMPLE_RATE))
+                event_data.append((start, start + arr.shape[0], arr))
+
+            cmd = [
+                "lame", "--silent", "-r", "-s", f"{SAMPLE_RATE / 1000.0:g}",
+                "--bitwidth", "16", "--signed", "--little-endian",
+                "-m", "s", "-b", MIX_BITRATE.rstrip("k"), "-q", "9", "-", str(tmp_path),
+            ]
+            started = time.monotonic()
+            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            try:
+                assert proc.stdin is not None
+                for chunk_start in range(0, total_frames, MIX_CHUNK_FRAMES):
+                    count = min(MIX_CHUNK_FRAMES, total_frames - chunk_start)
+                    rain_chunk = self._rain_slice(rain, rain_start_frame + chunk_start, count)
+                    mix = rain_chunk * rain_gain
+
+                    if fade_in_frames and chunk_start < fade_in_frames:
+                        idx = np.arange(chunk_start, chunk_start + count, dtype=np.float32)
+                        fade = np.clip(idx / max(1, fade_in_frames), 0.0, 1.0).reshape(-1, 1)
+                        mix *= fade
+                    if fade_out_frames and chunk_start + count > total_frames - fade_out_frames:
+                        idx = np.arange(chunk_start, chunk_start + count, dtype=np.float32)
+                        remaining = total_frames - idx
+                        fade = np.clip(remaining / max(1, fade_out_frames), 0.0, 1.0).reshape(-1, 1)
+                        mix *= fade
+
+                    chunk_end = chunk_start + count
+                    for ev_start, ev_end, arr in event_data:
+                        if ev_start >= chunk_end or ev_end <= chunk_start:
+                            continue
+                        overlap_start = max(chunk_start, ev_start)
+                        overlap_end = min(chunk_end, ev_end)
+                        dst_start = overlap_start - chunk_start
+                        src_start = overlap_start - ev_start
+                        length = overlap_end - overlap_start
+                        mix[dst_start : dst_start + length] += (
+                            np.asarray(arr[src_start : src_start + length], dtype=np.float32)
+                            * thunder_gain
+                        )
+
+                    np.clip(mix, -32768.0, 32767.0, out=mix)
+                    proc.stdin.write(mix.astype("<i2", copy=False).tobytes())
+                proc.stdin.close()
+                stderr = proc.stderr.read() if proc.stderr else b""
+                rc = proc.wait(timeout=180)
+                if rc != 0:
+                    raise RuntimeError(f"ffmpeg mixer failed ({rc}): {stderr.decode(errors='replace')[-800:]}")
+                tmp_path.replace(final_path)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                tmp_path.unlink(missing_ok=True)
+                raise
+            finally:
+                del rain
+                thunders.clear()
+
+            elapsed = time.monotonic() - started
+            logging.info(
+                "Generated dynamic mix %s: %.1fs audio, %d thunder events, rain=%d%% thunder=%d%% in %.2fs",
+                filename,
+                duration_seconds,
+                len(timeline),
+                rain_volume,
+                thunder_volume,
+                elapsed,
+            )
+            return MixBlock(
+                filename=filename,
+                path=final_path,
+                duration=float(duration_seconds),
+                timeline=list(timeline),
+                last_thunder=last,
+                rain_offset_seconds=float(rain_offset_seconds),
+            )
+
+
+class HAClient:
+    def __init__(self) -> None:
+        self.token = os.getenv("SUPERVISOR_TOKEN", "")
+        self.session: ClientSession | None = None
+
+    async def start(self) -> None:
+        self.session = ClientSession()
+
+    async def close(self) -> None:
+        if self.session:
+            await self.session.close()
+            self.session = None
+
+    async def call_service(self, domain: str, service: str, data: dict[str, Any]) -> bool:
+        if not self.token or not self.session:
+            return False
+        url = f"{HA_API}/services/{domain}/{service}"
+        headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
+        try:
+            async with self.session.post(url, headers=headers, json=data, timeout=15) as response:
+                if response.status >= 300:
+                    text = await response.text()
+                    logging.warning(
+                        "HA service %s.%s failed: %s %s",
+                        domain,
+                        service,
+                        response.status,
+                        text[:500],
+                    )
+                    return False
+                return True
+        except Exception:
+            logging.exception("HA service %s.%s failed", domain, service)
+            return False
+
+    async def get_state(self, entity_id: str) -> dict[str, Any] | None:
+        if not self.token or not self.session or not entity_id:
+            return None
+        url = f"{HA_API}/states/{entity_id}"
+        headers = {"Authorization": f"Bearer {self.token}"}
+        try:
+            async with self.session.get(url, headers=headers, timeout=5) as response:
+                if response.status >= 300:
+                    return None
+                payload = await response.json()
+                return payload if isinstance(payload, dict) else None
+        except Exception:
+            logging.exception("Could not read HA state for %s", entity_id)
+            return None
+
+
+class StormEngine:
+    def __init__(self, options: dict[str, Any], loop: asyncio.AbstractEventLoop) -> None:
+        self.options = options
+        self.loop = loop
+        self.z2m_base = str(options.get("z2m_base_topic", "zigbee2mqtt")).rstrip("/")
+        self.manual_lights = [str(item).strip() for item in options.get("lights", []) if str(item).strip()]
+        self.lightning_group = str(options.get("lightning_group", "Thunderstorm-Lights")).strip()
+        self.lights: list[str] = list(self.manual_lights)
+        self.light_source = "manual" if self.manual_lights else "group_auto"
+        self.group_found = False
+        self.group_member_ieees: list[str] = []
+        self.bridge_groups: list[dict[str, Any]] = []
+        self.bridge_devices: list[dict[str, Any]] = []
+
+        self.restore_on_stop = bool(options.get("restore_on_stop", True))
+        self.browser_audio = bool(options.get("browser_audio", True))
+        self.media_player = str(options.get("media_player", "")).strip()
+        self.media_player_audio = bool(options.get("media_player_audio", False)) and bool(self.media_player)
+
+        # Parallel cozy living-room mode. The scene is optional: if omitted, a built-in
+        # warm look is applied to the configured lights. The fireplace uses a separate
+        # media_player, so it can run at the same time as the storm Nest Hub stream.
+        self.cozy_scene = str(options.get("cozy_scene", "")).strip()
+        self.cozy_lights = [str(item).strip() for item in options.get("cozy_lights", []) if str(item).strip()]
+        self.cozy_media_player = str(options.get("cozy_media_player", "")).strip()
+        self.fireplace_media = str(
+            options.get("fireplace_media", "media-source://media_source/local/fireplace.mp4")
+        ).strip()
+        self.fireplace_volume = int(clamp(float(options.get("fireplace_volume", 35)), 0, 100))
+        self.cozy_restore_on_stop = bool(options.get("cozy_restore_on_stop", True))
+        self._cozy_active = False
