@@ -1,0 +1,14 @@
+# Example for scenes.yaml
+# Replace the entity IDs with your own lights.
+- id: wohnzimmer_gemuetlich
+  name: Wohnzimmer gemütlich
+  icon: mdi:fireplace
+  entities:
+    light.fire_accent:
+      state: "on"
+      brightness: 72
+      rgb_color: [255, 108, 28]
+    light.floor_lamp:
+      state: "on"
+      brightness: 96
+      color_temp_kelvin: 2300
