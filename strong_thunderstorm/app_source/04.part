@@ -1,0 +1,180 @@
+            setting_prefix = f"{CONTROL_PREFIX}/settings/"
+            if msg.topic.startswith(setting_prefix) and msg.topic.endswith("/command"):
+                key = msg.topic[len(setting_prefix) : -len("/command")]
+                raw_value: Any = payload_text.strip()
+                if key == "duration":
+                    key = "duration_minutes"
+                    labels = {"Endless": 0, "15 min": 15, "30 min": 30, "60 min": 60, "90 min": 90}
+                    raw_value = labels.get(str(raw_value), raw_value)
+                elif key == "intensity":
+                    key = "storm_intensity"
+                    labels = {"Original Strong": "original", "Ruhiger": "calm", "Extrem": "extreme"}
+                    raw_value = labels.get(str(raw_value), raw_value)
+                elif key == "timing":
+                    key = "thunder_timing"
+                    labels = {"Original (~100 ms)": "original", "Realistisch (150-900 m)": "realistic"}
+                    raw_value = labels.get(str(raw_value), raw_value)
+                self.update_setting(key, raw_value)
+                return
+
+            if msg.topic == f"{self.z2m_base}/bridge/groups":
+                payload = json.loads(payload_text)
+                if isinstance(payload, list):
+                    with self._meta_lock:
+                        self.bridge_groups = [x for x in payload if isinstance(x, dict)]
+                    self._refresh_group_members()
+                return
+
+            if msg.topic == f"{self.z2m_base}/bridge/devices":
+                payload = json.loads(payload_text)
+                if isinstance(payload, list):
+                    with self._meta_lock:
+                        self.bridge_devices = [x for x in payload if isinstance(x, dict)]
+                    self._refresh_group_members()
+                return
+
+            name = self.state_topics.get(msg.topic)
+            if not name:
+                return
+            payload = json.loads(payload_text)
+            if isinstance(payload, dict):
+                with self._state_lock:
+                    merged = dict(self.last_states.get(name, {}))
+                    merged.update(payload)
+                    self.last_states[name] = merged
+        except Exception:
+            logging.exception("Failed to handle MQTT message on %s", msg.topic)
+
+    def _refresh_group_members(self) -> None:
+        with self._meta_lock:
+            groups = list(self.bridge_groups)
+            devices = list(self.bridge_devices)
+        if not self.lightning_group:
+            self.group_found = False
+            self._set_lights(self.manual_lights if self.manual_lights else [])
+            return
+        group = next((item for item in groups if str(item.get("friendly_name", "")) == self.lightning_group), None)
+        self.group_found = group is not None
+        if self.manual_lights:
+            self._set_lights(self.manual_lights)
+            return
+        if not group:
+            self.group_member_ieees = []
+            self._set_lights([])
+            return
+        members = group.get("members", [])
+        ieee_members = [
+            str(member.get("ieee_address"))
+            for member in members
+            if isinstance(member, dict) and member.get("ieee_address")
+        ]
+        self.group_member_ieees = ieee_members
+        by_ieee = {
+            str(device.get("ieee_address")): str(device.get("friendly_name", "")).strip()
+            for device in devices
+            if device.get("ieee_address") and device.get("friendly_name")
+        }
+        self._set_lights([by_ieee[ieee] for ieee in ieee_members if by_ieee.get(ieee)])
+
+    def _set_lights(self, lights: list[str]) -> None:
+        unique = list(dict.fromkeys(name for name in lights if name))
+        old = list(self.lights)
+        if unique == old and self.state_topics:
+            return
+        self.lights = unique
+        old_topics = set(self.state_topics)
+        self.state_topics = {f"{self.z2m_base}/{name}": name for name in unique}
+        new_topics = set(self.state_topics)
+        if self.mqtt_connected:
+            for topic in new_topics - old_topics:
+                self.mqtt.subscribe(topic, qos=0)
+            for topic in old_topics - new_topics:
+                self.mqtt.unsubscribe(topic)
+        if unique != old:
+            logging.info(
+                "Resolved %d storm lights from %s: %s",
+                len(unique),
+                "manual configuration" if self.manual_lights else f"group {self.lightning_group}",
+                ", ".join(unique) if unique else "none",
+            )
+            asyncio.run_coroutine_threadsafe(self.broadcast_status(), self.loop)
+
+    def _discovery_device(self) -> dict[str, Any]:
+        return {
+            "identifiers": ["strong_thunderstorm_addon"],
+            "name": "Strong Thunderstorm",
+            "manufacturer": "Local Strong Thunderstorm port",
+            "model": "Zigbee2MQTT dynamic storm engine",
+            "sw_version": APP_VERSION,
+        }
+
+    def _publish_discovery(self) -> None:
+        device = self._discovery_device()
+        switch_config = {
+            "name": "Strong Thunderstorm",
+            "unique_id": "strong_thunderstorm_effect",
+            "command_topic": f"{CONTROL_PREFIX}/command",
+            "state_topic": f"{CONTROL_PREFIX}/state",
+            "payload_on": "ON",
+            "payload_off": "OFF",
+            "availability_topic": f"{CONTROL_PREFIX}/availability",
+            "icon": "mdi:weather-lightning-rainy",
+            "device": device,
+        }
+        button_config = {
+            "name": "Blitzlicht testen",
+            "unique_id": "strong_thunderstorm_test_lightning",
+            "command_topic": f"{CONTROL_PREFIX}/command",
+            "payload_press": "FLASH",
+            "availability_topic": f"{CONTROL_PREFIX}/availability",
+            "icon": "mdi:weather-lightning",
+            "device": device,
+        }
+        self.mqtt.publish(
+            f"{DISCOVERY_PREFIX}/switch/strong_thunderstorm/config",
+            json.dumps(switch_config, separators=(",", ":")), qos=1, retain=True,
+        )
+        self.mqtt.publish(
+            f"{DISCOVERY_PREFIX}/button/strong_thunderstorm_lightning/config",
+            json.dumps(button_config, separators=(",", ":")), qos=1, retain=True,
+        )
+
+        numbers = [
+            ("rain_volume", "Rain Volume", 0, 100, 1, "%", "mdi:weather-pouring"),
+            ("thunder_volume", "Thunder Volume", 0, 100, 1, "%", "mdi:weather-lightning"),
+            ("sync_offset_ms", "Lightning/Thunder Correction", -1500, 1500, 10, "ms", "mdi:timer-sync"),
+        ]
+        for key, name, minimum, maximum, step, unit, icon in numbers:
+            config = {
+                "name": name,
+                "unique_id": f"strong_thunderstorm_{key}",
+                "command_topic": f"{CONTROL_PREFIX}/settings/{key}/command",
+                "state_topic": f"{CONTROL_PREFIX}/settings/{key}/state",
+                "min": minimum,
+                "max": maximum,
+                "step": step,
+                "mode": "slider",
+                "unit_of_measurement": unit,
+                "availability_topic": f"{CONTROL_PREFIX}/availability",
+                "icon": icon,
+                "device": device,
+            }
+            self.mqtt.publish(
+                f"{DISCOVERY_PREFIX}/number/strong_thunderstorm_{key}/config",
+                json.dumps(config, separators=(",", ":")), qos=1, retain=True,
+            )
+
+        duration_config = {
+            "name": "Duration",
+            "unique_id": "strong_thunderstorm_duration",
+            "command_topic": f"{CONTROL_PREFIX}/settings/duration/command",
+            "state_topic": f"{CONTROL_PREFIX}/settings/duration/state",
+            "options": ["Endless", "15 min", "30 min", "60 min", "90 min"],
+            "availability_topic": f"{CONTROL_PREFIX}/availability",
+            "icon": "mdi:timer-outline",
+            "device": device,
+        }
+        self.mqtt.publish(
+            f"{DISCOVERY_PREFIX}/select/strong_thunderstorm_duration/config",
+            json.dumps(duration_config, separators=(",", ":")), qos=1, retain=True,
+        )
