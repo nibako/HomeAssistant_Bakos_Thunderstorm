@@ -2,7 +2,7 @@
 
 ## 1.3.2
 
-- Renamed the public app from **Strong Thunderstorm** to **Bako's Thunderstorm**.
+- Public branding is now **Bako's Thunderstorm** throughout the Home Assistant UI and documentation.
 - Updated Home Assistant app name, panel title, MQTT Discovery branding, web UI and documentation.
 - Renamed the visible intensity label `Original Strong` to `Original` without changing the underlying original storm behavior.
 - Kept the internal slug and technical identifiers unchanged for update compatibility.
