@@ -1,0 +1,180 @@
+                if first and immediate:
+                    delay = 0.0
+                else:
+                    low, high = INTENSITY_PROFILES.get(intensity, INTENSITY_PROFILES["original"])["rain_delay"]
+                    delay = float(random.randint(int(low), int(high))) if intensity == "original" else random.uniform(float(low), float(high))
+                first = False
+                if delay and not await self._sleep(delay):
+                    return
+                self._publish(
+                    name,
+                    {"state": "ON", "brightness": RAIN_BRIGHTNESS, "color": RAIN_COLOR, "transition": RAIN_TRANSITION},
+                )
+                if not await self._sleep(RAIN_GAP_SECONDS):
+                    return
+                self._publish(
+                    name,
+                    {"state": "ON", "brightness": BASE_BRIGHTNESS, "color": BASE_COLOR, "transition": RAIN_TRANSITION},
+                )
+                if not await self._sleep(RAIN_GAP_SECONDS):
+                    return
+        except asyncio.CancelledError:
+            raise
+
+    async def _timeline_lightning(self, event: dict[str, Any]) -> None:
+        brightness = int(event.get("brightness", 254))
+        self._publish_all({"state": "ON", "brightness": brightness, "color": LIGHTNING_COLOR, "transition": 0})
+        await self.emit({"type": "dynamic_lightning", "file": event.get("file"), "brightness": brightness})
+        if not await self._sleep(LIGHTNING_RETURN_DELAY):
+            return
+        self._publish_all({"state": "ON", "brightness": BASE_BRIGHTNESS, "color": BASE_COLOR, "transition": LIGHTNING_RETURN_TRANSITION})
+
+    def _publish_next_thunder(self, event: dict[str, Any], media_position: float = 0.0) -> None:
+        remaining = max(0.0, float(event.get("time", 0.0)) - media_position)
+        stamp = datetime.now(timezone.utc) + timedelta(seconds=remaining)
+        self.mqtt.publish(f"{CONTROL_PREFIX}/next_thunder", stamp.isoformat().replace("+00:00", "Z"), qos=1, retain=True)
+        distance = event.get("distance_m")
+        self.mqtt.publish(
+            f"{CONTROL_PREFIX}/next_thunder_distance",
+            str(int(distance)) if isinstance(distance, (int, float)) else "",
+            qos=1, retain=True,
+        )
+
+    async def _generate_next_block(self, current: MixBlock) -> MixBlock | None:
+        projected = self._session_consumed_seconds + current.duration
+        spec = self._next_block_spec(projected)
+        if not spec:
+            return None
+        duration, final = spec
+        next_offset = current.rain_offset_seconds + current.duration
+        return await self._build_mix_block(
+            duration_seconds=duration,
+            final_block=final,
+            initial_block=False,
+            previous_thunder=current.last_thunder,
+            rain_offset_seconds=next_offset,
+        )
+
+    async def _run_dynamic_media(self) -> None:
+        """Drive the unchanged Zigbee light engine from freshly generated Cast blocks."""
+        try:
+            block = self._current_block
+            if not block:
+                raise RuntimeError("No dynamic audio block is active")
+            if self._next_block_spec(self._session_consumed_seconds + block.duration):
+                self._next_block_task = asyncio.create_task(self._generate_next_block(block))
+
+            while self.running:
+                fallback_started = self._media_started_monotonic or self.loop.time()
+                # Preserve 1.0.3 behavior: the very first Strong lightning happens
+                # before rain-light workers begin. Continuation blocks resume rain immediately.
+                if self._session_consumed_seconds <= 0.0:
+                    await self._stop_rain_workers()
+                else:
+                    await self._start_rain_workers()
+                for event in block.timeline:
+                    if not self.running:
+                        return
+                    pos = await self._media_position()
+                    self._publish_next_thunder(event, pos or 0.0)
+                    sync_seconds = self.settings_snapshot()["sync_offset_ms"] / 1000.0
+                    lead_seconds = float(event.get("light_lead_seconds", ORIGINAL_LIGHT_LEAD_SECONDS))
+                    flash_time = max(0.0, float(event["time"]) - lead_seconds + sync_seconds)
+                    if not await self._wait_for_media_position(flash_time, fallback_started):
+                        return
+                    await self._stop_rain_workers()
+                    await self._timeline_lightning(event)
+                    if not await self._sleep(AFTER_LIGHTNING_DELAY):
+                        return
+                    await self._start_rain_workers()
+
+                self.mqtt.publish(f"{CONTROL_PREFIX}/next_thunder", "", qos=1, retain=True)
+                self.mqtt.publish(f"{CONTROL_PREFIX}/next_thunder_distance", "", qos=1, retain=True)
+                is_final_block = (
+                    self._session_total_seconds is not None
+                    and self._session_consumed_seconds + block.duration >= self._session_total_seconds - 0.25
+                )
+                if is_final_block:
+                    gentle_seconds = float(
+                        (self._active_mix_settings or self.settings_snapshot()).get(
+                            "gentle_end_seconds", DEFAULT_GENTLE_END_SECONDS
+                        )
+                    )
+                    if gentle_seconds > 0:
+                        fade_start = max(0.0, block.duration - gentle_seconds)
+                        if not await self._wait_for_media_position(fade_start, fallback_started):
+                            return
+                        await self._stop_rain_workers()
+                        self._publish_all(
+                            {
+                                "state": "ON",
+                                "brightness": BASE_BRIGHTNESS,
+                                "color": BASE_COLOR,
+                                "transition": min(2.0, gentle_seconds / 2.0),
+                            }
+                        )
+
+                tail_target = max(0.0, block.duration - 0.15)
+                if not await self._wait_for_media_position(tail_target, fallback_started):
+                    return
+                await self._stop_rain_workers()
+                self._session_consumed_seconds += block.duration
+
+                if self._session_total_seconds is not None and self._session_consumed_seconds >= self._session_total_seconds - 0.25:
+                    logging.info("Configured storm duration reached; stopping")
+                    asyncio.create_task(self.stop(fade_audio=False, natural_end=True))
+                    return
+
+                if not self._next_block_task:
+                    self._next_block_task = asyncio.create_task(self._generate_next_block(block))
+                try:
+                    next_block = await self._next_block_task
+                except asyncio.CancelledError:
+                    raise
+                self._next_block_task = None
+                if not self.running:
+                    return
+                if next_block is None:
+                    asyncio.create_task(self.stop(fade_audio=False, natural_end=True))
+                    return
+                old_name = block.filename
+                ok = await self._media_play_block(next_block)
+                if not ok:
+                    raise RuntimeError("Could not continue dynamic Cast stream")
+                await self._wait_media_player_ready(timeout=12.0)
+                block = next_block
+                self._current_block = block
+                (MEDIA_DIR / old_name).unlink(missing_ok=True)
+                if self._next_block_spec(self._session_consumed_seconds + block.duration):
+                    self._next_block_task = asyncio.create_task(self._generate_next_block(block))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logging.exception("Dynamic media storm engine crashed")
+            self.running = False
+            self.mqtt.publish(f"{CONTROL_PREFIX}/state", "OFF", qos=1, retain=True)
+            await self.emit({"type": "error", "message": str(exc)})
+            await self.broadcast_status()
+
+    async def test_media_mix(self) -> tuple[bool, str]:
+        if not self.media_player:
+            return False, "No media_player configured"
+        if not self.media_player_audio:
+            return False, "Mediaplayer-Audio is disabled"
+        if not self.assets_ready:
+            return False, "Dynamic audio mixer is not ready"
+        if self.running or self.mixing:
+            return False, "Stop the storm before running the audio test"
+        self.mixer.cleanup_session_files()
+        self.mixing = True
+        await self.broadcast_status()
+        settings = self.settings_snapshot()
+        timeline = [
+            {"time": 3.0, "file": "thunder-close-1.m4a", "brightness": 254},
+            {"time": 14.0, "file": "thunder-mid-2.m4a", "brightness": 203},
+        ]
+        try:
+            block = await asyncio.to_thread(
+                self.mixer.build_block,
+                duration_seconds=24.0,
+                light_count=max(1, len(self.lights)),
