@@ -49,7 +49,7 @@ configuration:
     description: Optionales entity_id für das Lagerfeuer-Video. Muss ein anderes Gerät als der Gewitter-Mediaplayer sein.
   fireplace_media:
     name: Lagerfeuer-Medium
-    description: Media-Source-URI oder direkt erreichbare HTTP(S)-Video-URL. Standard ist media-source://media_source/local/fireplace.mp4.
+    description: Media-Source-URI, direkte HTTP(S)-Video-URL oder YouTube-Link. YouTube-Links werden automatisch über die native YouTube-Cast-App gestartet.
   fireplace_volume:
     name: Lagerfeuer-Lautstärke
     description: Ziel-Lautstärke des Wohnzimmer-Mediaplayers in Prozent.
