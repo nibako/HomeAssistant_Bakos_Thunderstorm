@@ -1,5 +1,7 @@
 # Strong Thunderstorm for Home Assistant
 
+**Creator: Bako**
+
 A Home Assistant app/add-on for a synchronized thunderstorm ambience using
 **Zigbee2MQTT lights**, a dynamically mixed **single audio stream** for Cast/Nest
 players, and an optional **cozy living-room / fireplace mode**.
