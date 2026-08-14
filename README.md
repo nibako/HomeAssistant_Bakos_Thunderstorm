@@ -12,6 +12,7 @@ players, and an optional **cozy living-room / fireplace mode**.
 - Automatic discovery of members of a Zigbee2MQTT group
 - Dynamic rain + thunder mix generated freshly for every session
 - One-stream playback for Google Cast / Nest devices
+- Native YouTube Cast support for the optional fireplace video
 - Original-style and realistic lightning-to-thunder timing modes
 - Calm / Original / Extreme storm intensity variants
 - Persistent settings across Home Assistant/app restarts
@@ -40,7 +41,8 @@ repository is laid out accordingly.
 3. If you want audio on a Cast/Nest device, set its Home Assistant entity ID as
    `media_player` and enable `media_player_audio`.
 4. Optionally configure a second media player and Home Assistant scene/lights
-   for the cozy-room fireplace mode.
+   for the cozy-room fireplace mode. `fireplace_media` can be a direct video,
+   Home Assistant media-source URI, or a normal YouTube video URL.
 
 The app can resolve individual storm lights automatically from Zigbee2MQTT
 `bridge/groups` + `bridge/devices`, so the manual `lights` list can normally stay
@@ -63,7 +65,7 @@ See `AUDIO_LICENSE.md`.
 
 ## Version
 
-Current public release: **1.3.2**
+Current public release: **1.3.3**
 
 ## License
 
