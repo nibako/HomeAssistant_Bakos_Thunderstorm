@@ -21,6 +21,7 @@
                 event_payload["distance_m"] = distance_m
 
             if effective_lead < 0:
+                # Positive correction can intentionally move the flash after the audible thunder.
                 await self.emit(event_payload)
                 if not await self._sleep(-effective_lead):
                     return
