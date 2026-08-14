@@ -1,0 +1,183 @@
+#!/usr/bin/env python3
+import asyncio
+import json
+import logging
+import os
+import random
+import shutil
+import subprocess
+import threading
+import time
+import uuid
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+from aiohttp import ClientSession, web
+import paho.mqtt.client as mqtt
+
+APP_VERSION = "1.3.1"
+DATA_DIR = Path("/data")
+OPTIONS_PATH = DATA_DIR / "options.json"
+SETTINGS_PATH = DATA_DIR / "runtime-settings.json"
+PCM_DIR = DATA_DIR / "pcm"
+MEDIA_DIR = Path("/media/strong_thunderstorm")
+BUNDLED_AUDIO_DIR = Path("/app/audio")
+WEB_DIR = Path("/app/web")
+HA_API = "http://supervisor/core/api"
+CONTROL_PREFIX = "strong_thunderstorm"
+DISCOVERY_PREFIX = "homeassistant"
+
+# Reconstructed Strong Thunderstorm light parameters. These are deliberately kept
+# unchanged from the stable 1.0.3 light engine.
+BASE_COLOR = {"x": 0.1691, "y": 0.0441}
+BASE_BRIGHTNESS = 127
+RAIN_COLOR = {"x": 0.1691, "y": 0.0441}
+RAIN_BRIGHTNESS = 254
+RAIN_TRANSITION = 0.4
+LIGHTNING_COLOR = {"x": 0.3227, "y": 0.3290}
+LIGHTNING_RETURN_TRANSITION = 0.8
+RAIN_GAP_SECONDS = 0.525
+LIGHTNING_RETURN_DELAY = 0.125
+AFTER_LIGHTNING_DELAY = 1.125
+MAX_RAIN_LIGHTS = 10
+INITIAL_RAIN_STAGGER = 0.125
+ORIGINAL_LIGHT_LEAD_SECONDS = 0.100
+INITIAL_CAST_THUNDER_SECONDS = 1.750
+
+SOURCE_AUDIO_FILES = {
+    "rain-heavy.m4a",
+    "thunder-mid-1.m4a",
+    "thunder-mid-2.m4a",
+    "thunder-close-1.m4a",
+    "thunder-close-2.m4a",
+}
+THUNDER_FILES = {
+    "thunder-mid-1.m4a",
+    "thunder-mid-2.m4a",
+    "thunder-close-1.m4a",
+    "thunder-close-2.m4a",
+}
+THUNDERS = [
+    {"file": "thunder-mid-1.m4a", "brightness": 203, "weight": 0.12},
+    {"file": "thunder-mid-2.m4a", "brightness": 203, "weight": 0.12},
+    {"file": "thunder-close-1.m4a", "brightness": 254, "weight": 0.38},
+    {"file": "thunder-close-2.m4a", "brightness": 254, "weight": 0.38},
+]
+
+SAMPLE_RATE = 44100
+CHANNELS = 2
+PCM_BYTES_PER_FRAME = CHANNELS * 2
+MIX_CHUNK_FRAMES = SAMPLE_RATE // 2
+MIX_BITRATE = "160k"
+RAIN_FADE_IN_SECONDS = 5.0
+DEFAULT_GENTLE_END_SECONDS = 8
+GENTLE_END_OPTIONS = {0, 5, 8, 12}
+SESSION_BLOCK_MINUTES = 15
+DURATION_OPTIONS = {0, 15, 30, 60, 90}
+INTENSITY_OPTIONS = {"original", "calm", "extreme"}
+TIMING_OPTIONS = {"original", "realistic"}
+SPEED_OF_SOUND_M_S = 343.0
+REALISTIC_DISTANCE_MIN_M = 150.0
+REALISTIC_DISTANCE_MAX_M = 900.0
+
+INTENSITY_PROFILES = {
+    # The original profile is the reconstructed Strong behavior and must stay unchanged.
+    "original": {
+        "cycles": (5, 10),
+        "rain_delay": (1.0, 2.0),
+        "weights": (0.12, 0.12, 0.38, 0.38),
+        "label": "Original Strong",
+    },
+    # Optional variants. They reuse the same colors/transitions; only event density and
+    # thunder mix weighting are changed.
+    "calm": {
+        "cycles": (8, 14),
+        "rain_delay": (1.5, 3.0),
+        "weights": (0.30, 0.30, 0.20, 0.20),
+        "label": "Ruhiger",
+    },
+    "extreme": {
+        "cycles": (3, 6),
+        "rain_delay": (0.55, 1.35),
+        "weights": (0.05, 0.05, 0.45, 0.45),
+        "label": "Extrem",
+    },
+}
+
+DEFAULT_SETTINGS = {
+    "rain_volume": 100,
+    "thunder_volume": 100,
+    "sync_offset_ms": 0,
+    "duration_minutes": 0,
+    "storm_intensity": "original",
+    "thunder_timing": "original",
+    "cozy_enabled": False,
+    "gentle_end_seconds": DEFAULT_GENTLE_END_SECONDS,
+}
+
+
+def load_options() -> dict[str, Any]:
+    with OPTIONS_PATH.open("r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
+
+
+@dataclass
+class MixBlock:
+    filename: str
+    path: Path
+    duration: float
+    timeline: list[dict[str, Any]]
+    last_thunder: str | None
+    rain_offset_seconds: float
+
+
+class DynamicMixer:
+    """Build a fresh one-stream rain+thunder MP3 for each storm session/block."""
+
+    def __init__(self, source_dir: Path, media_dir: Path) -> None:
+        self.source_dir = source_dir
+        self.media_dir = media_dir
+        self.lock = threading.Lock()
+        self.ready = False
+        self.pcm_paths: dict[str, Path] = {}
+        self.frame_counts: dict[str, int] = {}
+
+    def prepare(self) -> bool:
+        self.media_dir.mkdir(parents=True, exist_ok=True)
+        PCM_DIR.mkdir(parents=True, exist_ok=True)
+        missing = [name for name in sorted(SOURCE_AUDIO_FILES) if not (self.source_dir / name).is_file()]
+        if missing:
+            logging.error("Bundled Strong audio is incomplete: %s", missing)
+            return False
+        if not shutil.which("ffmpeg"):
+            logging.error("ffmpeg is not installed")
+            return False
+        if not shutil.which("lame"):
+            logging.error("lame is not installed")
+            return False
+        try:
+            for name in SOURCE_AUDIO_FILES:
+                source = self.source_dir / name
+                # Keep the bundled source audio available to the browser audio fallback.
+                target = self.media_dir / name
+                if (not target.is_file()) or target.stat().st_size != source.stat().st_size:
+                    shutil.copyfile(source, target)
+                raw = PCM_DIR / f"{name}.s16le"
+                stamp = PCM_DIR / f"{name}.meta.json"
+                needs_decode = True
+                if raw.is_file() and stamp.is_file():
+                    try:
+                        meta = json.loads(stamp.read_text(encoding="utf-8"))
+                        needs_decode = not (
+                            int(meta.get("source_size", -1)) == source.stat().st_size
+                            and int(meta.get("sample_rate", 0)) == SAMPLE_RATE
+                            and int(meta.get("channels", 0)) == CHANNELS
+                            and raw.stat().st_size > 0
+                        )
