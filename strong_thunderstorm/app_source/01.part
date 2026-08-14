@@ -1,0 +1,180 @@
+                            and int(meta.get("channels", 0)) == CHANNELS
+                            and raw.stat().st_size > 0
+                        )
+                    except Exception:
+                        needs_decode = True
+                if needs_decode:
+                    tmp = raw.with_suffix(raw.suffix + ".tmp")
+                    tmp.unlink(missing_ok=True)
+                    cmd = [
+                        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                        "-i", str(source), "-vn", "-ac", str(CHANNELS),
+                        "-ar", str(SAMPLE_RATE), "-f", "s16le", str(tmp),
+                    ]
+                    logging.info("Decoding source audio cache: %s", name)
+                    subprocess.run(cmd, check=True, timeout=180)
+                    tmp.replace(raw)
+                    stamp.write_text(
+                        json.dumps(
+                            {
+                                "source_size": source.stat().st_size,
+                                "sample_rate": SAMPLE_RATE,
+                                "channels": CHANNELS,
+                            },
+                            separators=(",", ":"),
+                        ),
+                        encoding="utf-8",
+                    )
+                self.pcm_paths[name] = raw
+                self.frame_counts[name] = raw.stat().st_size // PCM_BYTES_PER_FRAME
+            self.ready = all(self.frame_counts.get(name, 0) > 0 for name in SOURCE_AUDIO_FILES)
+            logging.info("Dynamic audio mixer ready (%d decoded source files)", len(self.pcm_paths))
+            return self.ready
+        except Exception:
+            logging.exception("Could not prepare dynamic audio mixer")
+            return False
+
+    def cleanup_session_files(self, keep: set[str] | None = None) -> None:
+        keep = keep or set()
+        for path in self.media_dir.glob("session-*.mp3"):
+            if path.name not in keep:
+                path.unlink(missing_ok=True)
+        for path in self.media_dir.glob("test-mix-*.mp3"):
+            if path.name not in keep:
+                path.unlink(missing_ok=True)
+
+    @staticmethod
+    def _choose_thunder(
+        rng: random.Random, last_file: str | None, intensity: str = "original"
+    ) -> dict[str, Any]:
+        profile = INTENSITY_PROFILES.get(intensity, INTENSITY_PROFILES["original"])
+        weighted = list(zip(THUNDERS, profile["weights"], strict=True))
+        available = [(item, weight) for item, weight in weighted if item["file"] != last_file]
+        choices = [item for item, _ in available]
+        weights = [float(weight) for _, weight in available]
+        return rng.choices(choices, weights=weights, k=1)[0]
+
+    @staticmethod
+    def _sample_delay(rng: random.Random, intensity: str, immediate: bool = False) -> float:
+        if immediate:
+            return 0.0
+        profile = INTENSITY_PROFILES.get(intensity, INTENSITY_PROFILES["original"])
+        low, high = profile["rain_delay"]
+        if intensity == "original":
+            # Preserve the exact old Strong randint(1, 2) behavior.
+            return float(rng.randint(int(low), int(high)))
+        return float(rng.uniform(float(low), float(high)))
+
+    @staticmethod
+    def _simulate_interval(rng: random.Random, light_count: int, intensity: str) -> float:
+        """Simulate one rain-worker cycle until the next lightning for the selected profile."""
+        profile = INTENSITY_PROFILES.get(intensity, INTENSITY_PROFILES["original"])
+        cycle_min, cycle_max = profile["cycles"]
+        target_count = rng.randint(int(cycle_min), int(cycle_max))
+        worker_count = max(1, min(MAX_RAIN_LIGHTS, light_count))
+        durations: list[float] = []
+        for idx in range(worker_count):
+            elapsed = idx * INITIAL_RAIN_STAGGER
+            for cycle in range(target_count):
+                delay = DynamicMixer._sample_delay(
+                    rng, intensity, immediate=(idx == 0 and cycle == 0)
+                )
+                elapsed += float(delay) + (2 * RAIN_GAP_SECONDS)
+            durations.append(elapsed)
+        return AFTER_LIGHTNING_DELAY + max(durations)
+
+    @staticmethod
+    def _event_light_lead(rng: random.Random, timing_mode: str) -> tuple[float, float | None]:
+        if timing_mode != "realistic":
+            return ORIGINAL_LIGHT_LEAD_SECONDS, None
+        distance = rng.uniform(REALISTIC_DISTANCE_MIN_M, REALISTIC_DISTANCE_MAX_M)
+        return distance / SPEED_OF_SOUND_M_S, distance
+
+    def generate_timeline(
+        self,
+        duration: float,
+        light_count: int,
+        *,
+        initial_block: bool,
+        previous_thunder: str | None = None,
+        intensity: str = "original",
+        timing_mode: str = "original",
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        seed = time.time_ns() ^ os.getpid() ^ random.getrandbits(32)
+        rng = random.Random(seed)
+        timeline: list[dict[str, Any]] = []
+        last = previous_thunder
+        if initial_block:
+            t = INITIAL_CAST_THUNDER_SECONDS
+        else:
+            # Continuation blocks should not force an artificial immediate thunder.
+            t = self._simulate_interval(rng, light_count, intensity)
+
+        # Leave enough tail for the longest close thunder rather than cutting it in half.
+        latest_start = max(0.0, duration - 14.0)
+        while t <= latest_start:
+            thunder = self._choose_thunder(rng, last, intensity)
+            last = str(thunder["file"])
+            lead_seconds, distance_m = self._event_light_lead(rng, timing_mode)
+            if initial_block and not timeline:
+                # Realistic mode needs enough preroll to let the flash happen before the first thunder.
+                t = max(t, lead_seconds + 0.55)
+            event = {
+                "time": round(t, 3),
+                "file": last,
+                "brightness": int(thunder["brightness"]),
+                "light_lead_seconds": round(float(lead_seconds), 3),
+            }
+            if distance_m is not None:
+                event["distance_m"] = int(round(distance_m))
+            timeline.append(event)
+            t += self._simulate_interval(rng, light_count, intensity)
+        return timeline, last
+
+    def _rain_slice(self, rain: np.memmap, start: int, count: int) -> np.ndarray:
+        total = rain.shape[0]
+        pos = start % total
+        if pos + count <= total:
+            return np.asarray(rain[pos : pos + count], dtype=np.float32)
+        first = np.asarray(rain[pos:], dtype=np.float32)
+        remaining = count - first.shape[0]
+        second = np.asarray(rain[:remaining], dtype=np.float32)
+        return np.concatenate((first, second), axis=0)
+
+    def build_block(
+        self,
+        *,
+        duration_seconds: float,
+        light_count: int,
+        rain_volume: int,
+        thunder_volume: int,
+        initial_block: bool,
+        previous_thunder: str | None,
+        rain_offset_seconds: float,
+        fade_out_seconds: float,
+        filename_prefix: str = "session",
+        explicit_timeline: list[dict[str, Any]] | None = None,
+        intensity: str = "original",
+        timing_mode: str = "original",
+    ) -> MixBlock:
+        if not self.ready:
+            raise RuntimeError("Dynamic mixer is not ready")
+        with self.lock:
+            timeline, last = (
+                (explicit_timeline, previous_thunder)
+                if explicit_timeline is not None
+                else self.generate_timeline(
+                    duration_seconds,
+                    light_count,
+                    initial_block=initial_block,
+                    previous_thunder=previous_thunder,
+                    intensity=intensity,
+                    timing_mode=timing_mode,
+                )
+            )
+            if explicit_timeline is not None and explicit_timeline:
+                last = str(explicit_timeline[-1]["file"])
+
+            filename = f"{filename_prefix}-{uuid.uuid4().hex[:12]}.mp3"
+            final_path = self.media_dir / filename
+            tmp_path = final_path.with_suffix(".mp3.tmp")
