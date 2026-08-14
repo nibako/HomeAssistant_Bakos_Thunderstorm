@@ -1,4 +1,4 @@
-# Bako's Thunderstorm 1.3.2 — Installation & configuration
+# Bako's Thunderstorm 1.3.3 — Installation & configuration
 
 **Creator: Bako**
 
@@ -57,9 +57,19 @@ cozy_enabled: true
 cozy_scene: scene.living_room_cozy
 cozy_lights: []
 cozy_media_player: media_player.living_room_tv
-fireplace_media: media-source://media_source/local/fireplace.mp4
+fireplace_media: https://www.youtube.com/watch?v=YOUR_VIDEO_ID
 fireplace_volume: 35
 ```
+
+`fireplace_media` accepts Home Assistant media-source URIs, direct video URLs
+and normal YouTube links. Starting with 1.3.3, YouTube URLs are detected
+automatically and sent through the native YouTube Cast app instead of being
+passed to the generic Cast video receiver.
+
+Supported YouTube URL forms include `youtube.com/watch?v=...`, `youtu.be/...`,
+`youtube.com/shorts/...`, `youtube.com/live/...` and `youtube.com/embed/...`.
+If a YouTube playlist parameter is present together with a video ID, it is passed
+to the Cast app as well.
 
 You can either supply a Home Assistant scene (`cozy_scene`) or leave it blank
 and configure entities in `cozy_lights`.
