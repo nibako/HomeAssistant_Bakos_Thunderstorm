@@ -13,6 +13,7 @@ RUN apk add --no-cache \
 
 COPY run.sh /
 COPY app.py /app/app.py
+COPY app_source /app/app_source
 COPY web /app/web
 COPY generate_audio.py /tmp/generate_audio.py
 RUN mkdir -p /app/audio \
