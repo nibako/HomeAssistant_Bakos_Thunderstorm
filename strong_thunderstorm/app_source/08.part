@@ -1,0 +1,180 @@
+            if not self.running and not self._task and not self.mixing and not self._cozy_active and not self.ending:
+                return True, "already stopped"
+
+            settings = self._active_mix_settings or self.settings_snapshot()
+            gentle_seconds = float(settings.get("gentle_end_seconds", DEFAULT_GENTLE_END_SECONDS))
+            if not fade_audio and not natural_end:
+                gentle_seconds = 0.0
+
+            was_running = self.running
+            self.ending = gentle_seconds > 0 and (was_running or self._cozy_active)
+            # Stop creating new rain pulses / lightning immediately, but keep the current
+            # base ambience visible while audio and fireplace fade down.
+            self.running = False
+            self.mqtt.publish(f"{CONTROL_PREFIX}/next_thunder", "", qos=1, retain=True)
+            self.mqtt.publish(f"{CONTROL_PREFIX}/next_thunder_distance", "", qos=1, retain=True)
+            if self.ending:
+                await self.emit({"type": "storm_ending", "seconds": gentle_seconds})
+                self._publish_all(
+                    {"state": "ON", "brightness": BASE_BRIGHTNESS, "color": BASE_COLOR, "transition": min(2.0, gentle_seconds / 2.0)}
+                )
+                await self.broadcast_status()
+
+            current_task = asyncio.current_task()
+            task = self._task
+            self._task = None
+            if task and task is not current_task and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    logging.exception("Storm task failed while stopping")
+            if self._next_block_task and not self._next_block_task.done():
+                self._next_block_task.cancel()
+                await asyncio.gather(self._next_block_task, return_exceptions=True)
+            self._next_block_task = None
+            await self._stop_rain_workers()
+
+            ending_started = self.loop.time()
+            fade_tasks: list[asyncio.Task] = []
+            # Manual stop: fade the Cast player itself. Natural finite sessions already
+            # carry their rain fade in the rendered final MP3 block.
+            if self.media_player_audio and was_running and gentle_seconds > 0 and fade_audio:
+                fade_tasks.append(asyncio.create_task(self._fade_media_player_out(gentle_seconds)))
+            if self._cozy_active:
+                fade_tasks.append(asyncio.create_task(self._stop_cozy_mode(fade_seconds=gentle_seconds)))
+
+            if fade_tasks:
+                await asyncio.gather(*fade_tasks, return_exceptions=True)
+            elif self._cozy_active:
+                await self._stop_cozy_mode()
+
+            if self.media_player_audio and was_running:
+                await self.ha.call_service("media_player", "media_stop", {"entity_id": self.media_player})
+                if self._media_original_volume is not None:
+                    await self.ha.call_service(
+                        "media_player", "volume_set",
+                        {"entity_id": self.media_player, "volume_level": self._media_original_volume},
+                    )
+            if self.ending and gentle_seconds > 0 and not self.media_player_audio:
+                # Browser audio fades in the UI after storm_ending. Cozy fade/restore may
+                # run in parallel; wait only for the remainder of the configured ending.
+                remaining = gentle_seconds - max(0.0, self.loop.time() - ending_started)
+                if remaining > 0:
+                    await asyncio.sleep(remaining)
+
+            self._media_original_volume = None
+            await self.emit({"type": "storm_stopped"})
+            await self._restore_states()
+            self.session_lights = []
+            self._current_block = None
+            self._active_mix_settings = None
+            self._session_total_seconds = None
+            self._session_consumed_seconds = 0.0
+            self.ending = False
+            self.mqtt.publish(f"{CONTROL_PREFIX}/state", "OFF", qos=1, retain=True)
+            self.mixer.cleanup_session_files()
+            await self.broadcast_status()
+            logging.info("Strong Thunderstorm stopped%s", " with gentle ending" if gentle_seconds > 0 else "")
+            return True, "stopped"
+
+    # --- Stable 1.0.3 light engine path (browser/no Cast) ---
+    async def _run_original(self) -> None:
+        try:
+            deadline = None if self._session_total_seconds is None else self.loop.time() + self._session_total_seconds
+            await self._lightning()
+            if not await self._sleep(AFTER_LIGHTNING_DELAY):
+                return
+            while self.running:
+                if deadline is not None and self.loop.time() >= deadline:
+                    asyncio.create_task(self.stop(fade_audio=True, natural_end=True))
+                    return
+                profile_name = str((self._active_mix_settings or self.settings_snapshot()).get("storm_intensity", "original"))
+                profile = INTENSITY_PROFILES.get(profile_name, INTENSITY_PROFILES["original"])
+                cycle_min, cycle_max = profile["cycles"]
+                start_lightning_at = random.randint(int(cycle_min), int(cycle_max))
+                targets = list(self.session_lights)
+                random.shuffle(targets)
+                targets = targets[: min(MAX_RAIN_LIGHTS, len(targets))]
+                workers = [
+                    asyncio.create_task(
+                        self._rain_worker(
+                            name,
+                            start_lightning_at,
+                            immediate=(idx == 0),
+                            stagger=idx * INITIAL_RAIN_STAGGER,
+                        )
+                    )
+                    for idx, name in enumerate(targets)
+                ]
+                if deadline is None:
+                    await asyncio.gather(*workers)
+                else:
+                    remaining = max(0.01, deadline - self.loop.time())
+                    try:
+                        await asyncio.wait_for(asyncio.gather(*workers), timeout=remaining)
+                    except asyncio.TimeoutError:
+                        for worker in workers:
+                            worker.cancel()
+                        await asyncio.gather(*workers, return_exceptions=True)
+                        asyncio.create_task(self.stop(fade_audio=True, natural_end=True))
+                        return
+                if not self.running:
+                    return
+                await self._lightning()
+                if not await self._sleep(AFTER_LIGHTNING_DELAY):
+                    return
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logging.exception("Storm engine crashed")
+            self.running = False
+            self.mqtt.publish(f"{CONTROL_PREFIX}/state", "OFF", qos=1, retain=True)
+            await self.emit({"type": "error", "message": str(exc)})
+            await self.broadcast_status()
+
+    async def _rain_worker(self, name: str, target_count: int, immediate: bool, stagger: float) -> None:
+        if stagger and not await self._sleep(stagger):
+            return
+        count = 0
+        first = True
+        while self.running:
+            count += 1
+            intensity = str((self._active_mix_settings or self.settings_snapshot()).get("storm_intensity", "original"))
+            if first and immediate:
+                delay = 0.0
+            else:
+                low, high = INTENSITY_PROFILES.get(intensity, INTENSITY_PROFILES["original"])["rain_delay"]
+                delay = float(random.randint(int(low), int(high))) if intensity == "original" else random.uniform(float(low), float(high))
+            first = False
+            if delay and not await self._sleep(delay):
+                return
+            self._publish(
+                name,
+                {"state": "ON", "brightness": RAIN_BRIGHTNESS, "color": RAIN_COLOR, "transition": RAIN_TRANSITION},
+            )
+            if not await self._sleep(RAIN_GAP_SECONDS):
+                return
+            self._publish(
+                name,
+                {"state": "ON", "brightness": BASE_BRIGHTNESS, "color": BASE_COLOR, "transition": RAIN_TRANSITION},
+            )
+            if not await self._sleep(RAIN_GAP_SECONDS):
+                return
+            if count >= target_count:
+                return
+
+    def _choose_thunder(self) -> dict[str, Any]:
+        intensity = str((self._active_mix_settings or self.settings_snapshot()).get("storm_intensity", "original"))
+        profile = INTENSITY_PROFILES.get(intensity, INTENSITY_PROFILES["original"])
+        weighted = list(zip(THUNDERS, profile["weights"], strict=True))
+        available = [(item, weight) for item, weight in weighted if item["file"] != self.last_thunder]
+        choices = [item for item, _ in available]
+        weights = [float(weight) for _, weight in available]
+        thunder = random.choices(choices, weights=weights, k=1)[0]
+        self.last_thunder = str(thunder["file"])
+        return thunder
+
+    def _browser_light_lead_seconds(self) -> tuple[float, int | None]:
