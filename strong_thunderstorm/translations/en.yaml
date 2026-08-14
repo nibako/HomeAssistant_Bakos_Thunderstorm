@@ -1,0 +1,64 @@
+configuration:
+  z2m_base_topic:
+    name: Zigbee2MQTT base topic
+    description: Usually zigbee2mqtt.
+  lightning_group:
+    name: Zigbee2MQTT lightning group
+    description: Friendly name of the Zigbee2MQTT group; members are discovered automatically.
+  lights:
+    name: Manual light override
+    description: Optional. Leave empty to discover members from the lightning group.
+  browser_audio:
+    name: Browser audio
+    description: Local web UI audio fallback. Disabled automatically when media-player audio is active.
+  media_player:
+    name: Storm media player
+    description: Optional entity_id such as media_player.nesthub for the mixed rain+thunder single stream.
+  media_player_audio:
+    name: Storm media-player audio
+    description: Generate and play one mixed rain+thunder MP3 per block for Nest/Chromecast.
+  rain_volume:
+    name: Rain volume
+    description: Initial percentage; also adjustable from the web UI and MQTT number entity.
+  thunder_volume:
+    name: Thunder volume
+    description: Initial percentage; 100 percent matches the original level.
+  sync_offset_ms:
+    name: Lightning/thunder correction
+    description: Additional device latency correction in milliseconds.
+  duration_minutes:
+    name: Storm duration
+    description: 0 means endless; otherwise 15, 30, 60 or 90 minutes.
+  storm_intensity:
+    name: Storm intensity
+    description: Original keeps Strong unchanged. Calm and Extreme are optional density variants.
+  thunder_timing:
+    name: Thunder timing
+    description: Original uses about 100 ms light lead. Realistic simulates roughly 150 to 900 metres distance per thunder.
+  cozy_enabled:
+    name: Start cozy living room
+    description: Starts cozy living-room lighting and optionally a fireplace video on a second media player.
+  cozy_scene:
+    name: Cozy living-room scene
+    description: Optional scene entity. Leave blank to use the built-in cozy look for the configured lights.
+  cozy_lights:
+    name: Cozy living-room lights
+    description: Optional Home Assistant light entities; snapshotted before start and restored on stop.
+  cozy_media_player:
+    name: Living-room TV / media player
+    description: Optional entity_id for the fireplace video. Must be different from the storm media player.
+  fireplace_media:
+    name: Fireplace media
+    description: Media-source URI or HTTP(S) video URL. Default is media-source://media_source/local/fireplace.mp4.
+  fireplace_volume:
+    name: Fireplace volume
+    description: Target volume of the living-room media player in percent.
+  cozy_restore_on_stop:
+    name: Restore living room on stop
+    description: Restore previous living-room lights, stop the fireplace and restore the previous TV volume.
+  restore_on_stop:
+    name: Restore storm lights on stop
+    description: Restore Zigbee2MQTT states captured at storm start.
+  log_level:
+    name: Log level
+    description: App log verbosity.
