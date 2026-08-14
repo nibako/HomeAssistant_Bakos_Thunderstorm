@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.3.3
+
+- Fixed fireplace playback when `fireplace_media` contains a YouTube URL.
+- Added automatic YouTube video-ID extraction for watch, youtu.be, Shorts, Live and Embed URLs.
+- YouTube fireplace media now uses Home Assistant's native `media_content_type: cast` payload with `app_name: youtube`.
+- Direct video files, HTTP(S) streams and Home Assistant media-source URIs continue to use the existing generic video path.
+
 ## 1.3.2
 
 - Public branding is now **Bako's Thunderstorm** throughout the Home Assistant UI and documentation.
