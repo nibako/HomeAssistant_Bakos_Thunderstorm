@@ -132,7 +132,7 @@
         self.assets_ready = await asyncio.to_thread(self.mixer.prepare)
         host = os.getenv("MQTT_HOST", "core-mosquitto")
         port = int(os.getenv("MQTT_PORT", "1883"))
-        logging.info("Strong Thunderstorm %s", APP_VERSION)
+        logging.info("Bako's Thunderstorm %s", APP_VERSION)
         logging.info("Persistent session settings loaded: %s", self.settings_snapshot())
         logging.info("Connecting to MQTT service at %s:%s", host, port)
         self.mqtt.connect_async(host, port, keepalive=30)
