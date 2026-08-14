@@ -1,4 +1,4 @@
-# Strong Thunderstorm 1.3.1 — Installation & configuration
+# Bako's Thunderstorm 1.3.2 — Installation & configuration
 
 **Creator: Bako**
 
@@ -8,7 +8,7 @@ Add the repository URL in Home Assistant's App store:
 
 `https://github.com/nibako/HomeAssistant_Bakos_Thunderstorm`
 
-Then install **Strong Thunderstorm**.
+Then install **Bako's Thunderstorm**.
 
 ## Zigbee2MQTT
 
@@ -39,7 +39,7 @@ project and licensed CC0; no third-party app audio is included.
 
 - Rain volume: 0–100%
 - Thunder volume: 0–100%
-- Storm intensity: Original Strong / Calm / Extreme
+- Storm intensity: Original / Calm / Extreme
 - Thunder timing: Original (~100 ms light lead) / Realistic (simulated distance)
 - Sync correction: -1500 to +1500 ms
 - Duration: Endless / 15 / 30 / 60 / 90 min
@@ -64,5 +64,5 @@ fireplace_volume: 35
 You can either supply a Home Assistant scene (`cozy_scene`) or leave it blank
 and configure entities in `cozy_lights`.
 
-On stop, Strong Thunderstorm fades the ambience first and then restores the
+On stop, Bako's Thunderstorm fades the ambience first and then restores the
 captured room/player states.
