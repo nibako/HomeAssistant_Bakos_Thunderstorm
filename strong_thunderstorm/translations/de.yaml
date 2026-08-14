@@ -31,7 +31,7 @@ configuration:
     description: 0 bedeutet Endlos; alternativ 15, 30, 60 oder 90 Minuten.
   storm_intensity:
     name: Gewitterintensität
-    description: Original lässt Strong unverändert. Ruhiger und Extrem sind optionale Varianten mit anderer Ereignisdichte.
+    description: Original lässt das ursprüngliche Verhalten unverändert. Ruhiger und Extrem sind optionale Varianten mit anderer Ereignisdichte.
   thunder_timing:
     name: Donner-Timing
     description: Original nutzt ungefähr 100 ms Lichtvorsprung. Realistisch simuliert pro Donner eine zufällige Entfernung von etwa 150 bis 900 Metern.
