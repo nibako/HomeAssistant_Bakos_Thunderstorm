@@ -1,4 +1,4 @@
-# Strong Thunderstorm for Home Assistant
+# Bako's Thunderstorm for Home Assistant
 
 **Creator: Bako**
 
@@ -8,12 +8,12 @@ players, and an optional **cozy living-room / fireplace mode**.
 
 ## Features
 
-- Strong thunderstorm light engine over Zigbee2MQTT
+- Thunderstorm light engine over Zigbee2MQTT
 - Automatic discovery of members of a Zigbee2MQTT group
 - Dynamic rain + thunder mix generated freshly for every session
 - One-stream playback for Google Cast / Nest devices
 - Original-style and realistic lightning-to-thunder timing modes
-- Calm / Strong / Extreme storm intensity variants
+- Calm / Original / Extreme storm intensity variants
 - Persistent settings across Home Assistant/app restarts
 - Gentle 0 / 5 / 8 / 12 second session ending
 - Optional second-room cozy scene and fireplace media playback
@@ -27,7 +27,7 @@ In Home Assistant open **Settings → Apps → App store → ⋮ → Repositorie
 
 `https://github.com/nibako/HomeAssistant_Bakos_Thunderstorm`
 
-Then install **Strong Thunderstorm** from that repository.
+Then install **Bako's Thunderstorm** from that repository.
 
 Home Assistant requires `repository.yaml` at the root of an app repository; this
 repository is laid out accordingly.
@@ -63,7 +63,7 @@ See `AUDIO_LICENSE.md`.
 
 ## Version
 
-Current public release: **1.3.1**
+Current public release: **1.3.2**
 
 ## License
 
