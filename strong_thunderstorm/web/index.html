@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <title>Strong Thunderstorm</title>
+  <style>
+    :root { color-scheme: dark; --bg:#07111d; --panel:#0d1b2a; --panel2:#10243a; --text:#eef6ff; --muted:#9db1c7; --accent:#7cc8ff; --fire:#ffb15a; --danger:#ff6b7a; --ok:#72e1a1; --warn:#ffd47b; }
+    * { box-sizing:border-box; }
+    body { margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif; background:radial-gradient(circle at 50% -20%,#183a5c 0,#07111d 55%); color:var(--text); min-height:100vh; }
+    main { max-width:860px; margin:0 auto; padding:28px 18px 44px; }
+    h1 { margin:0 0 4px; font-size:clamp(28px,6vw,44px); letter-spacing:-.04em; }
+    h3 { margin:0 0 14px; }
+    .sub { color:var(--muted); margin-bottom:22px; }
+    .card { background:linear-gradient(180deg,var(--panel2),var(--panel)); border:1px solid #29415a; border-radius:18px; padding:18px; margin:14px 0; box-shadow:0 16px 40px #0005; }
+    .hero { text-align:center; padding:28px 18px; }
+    .storm-icon { font-size:74px; filter:drop-shadow(0 0 22px #8bd2ff55); }
+    .state { font-size:18px; font-weight:700; margin:6px 0 20px; }
+    .state.on { color:var(--ok); }
+    .state.off { color:var(--muted); }
+    .buttons { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+    button { border:0; border-radius:13px; padding:14px 16px; min-height:46px; font:inherit; font-weight:800; cursor:pointer; }
+    button.primary { background:#eaf6ff; color:#09213a; }
+    button.stop { background:#42202b; color:#ffdce1; }
+    button.secondary { background:#17324e; color:#d9edff; }
+    button.fire { background:#4b3020; color:#ffe6c5; border:1px solid #80512c; }
+    button:disabled { opacity:.45; cursor:not-allowed; }
+    .range-with-reset { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:center; gap:10px; }
+    button.zero { min-height:34px; padding:6px 11px; border:1px solid #35506b; border-radius:9px; background:#0a1a2b; color:#d9edff; font-size:13px; font-weight:800; }
+    button.zero:hover { background:#17324e; }
+    .wide { grid-column:1/-1; }
+    .row { display:flex; align-items:center; justify-content:space-between; gap:14px; padding:8px 0; border-bottom:1px solid #ffffff12; }
+    .row:last-child { border-bottom:0; }
+    .label { color:var(--muted); }
+    .value { text-align:right; overflow-wrap:anywhere; }
+    .dot { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:7px; background:#64748b; }
+    .dot.ok { background:var(--ok); box-shadow:0 0 8px #72e1a188; }
+    .warn { color:var(--warn); }
+    .error { color:#ff9aa6; }
+    .small { font-size:13px; color:var(--muted); line-height:1.5; }
+    .settings { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+    .setting { background:#07152399; border:1px solid #ffffff12; border-radius:14px; padding:14px; min-width:0; }
+    .setting label { display:flex; justify-content:space-between; gap:10px; font-weight:700; margin-bottom:10px; }
+    input[type=range] { width:100%; appearance:none; height:6px; border-radius:999px; background:linear-gradient(to right,var(--accent) 0 var(--fill,50%),#506070 var(--fill,50%) 100%); outline:none; }
+    input[type=range]::-webkit-slider-thumb { appearance:none; width:17px; height:17px; border-radius:50%; background:#b8ddff; border:2px solid #7cc8ff; cursor:pointer; }
+    input[type=range]::-moz-range-thumb { width:15px; height:15px; border-radius:50%; background:#b8ddff; border:2px solid #7cc8ff; cursor:pointer; }
+    select { width:100%; min-height:44px; border:1px solid #35506b; background:#0a1a2b; color:var(--text); border-radius:10px; padding:10px 12px; font:inherit; }
+    .switchline { display:flex; align-items:center; justify-content:space-between; gap:16px; }
+    .switchline input { width:22px; height:22px; accent-color:var(--fire); }
+    .cozy { border-color:#6b4b2d; background:linear-gradient(180deg,#2b2119,#12191f); }
+    .cozy h3 { color:#ffe0b0; }
+    code { color:#cbe8ff; }
+    @media (max-width:620px) { .settings,.buttons { grid-template-columns:1fr; } .wide { grid-column:auto; } .row { align-items:flex-start; flex-direction:column; gap:3px; } .value { text-align:left; } }
+    .creator{margin-top:18px;text-align:center;font-size:12px;color:#8fa8c4;opacity:.8}
+  </style>
+</head>
+<body>
+<main>
+  <h1>Strong Thunderstorm</h1>
+  <div class="sub">Zigbee2MQTT · dynamischer Strong-Mix · Gewitterabend · Version 1.3.1</div>
+
+  <section class="card hero">
+    <div class="storm-icon">⛈️</div>
+    <div id="state" class="state off">Gestoppt</div>
+    <div class="buttons">
+      <button id="start" class="primary">▶ Gewitter starten</button>
+      <button id="stop" class="stop">■ Stoppen</button>
+      <button id="flash" class="secondary">⚡ Blitzlicht testen</button>
+      <button id="mediaTest" class="secondary">🔊 Dynamischen Mix testen</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <h3>Gewitter-Session</h3>
+    <div class="settings">
+      <div class="setting">
+        <label><span>Regenlautstärke</span><span id="rainVolLabel">100%</span></label>
+        <input id="rainVol" type="range" min="0" max="100" value="100" step="1">
+      </div>
+      <div class="setting">
+        <label><span>Donnerlautstärke</span><span id="thunderVolLabel">100%</span></label>
+        <input id="thunderVol" type="range" min="0" max="100" value="100" step="1">
+      </div>
+      <div class="setting">
+        <label><span>Intensität</span><span></span></label>
+        <select id="intensity">
+          <option value="original">Original Strong</option>
+          <option value="calm">Ruhiger</option>
+          <option value="extreme">Extrem</option>
+        </select>
+        <div class="small">Original Strong bleibt 1:1 der bisherige Modus. Ruhiger/Extrem ändern nur Ereignisdichte und Donnergewichtung.</div>
+      </div>
+      <div class="setting">
+        <label><span>Donner-Timing</span><span></span></label>
+        <select id="timing">
+          <option value="original">Original · ca. 100 ms</option>
+          <option value="realistic">Realistisch · 150–900 m</option>
+        </select>
+        <div class="small">Realistisch setzt pro Donner eine zufällige Entfernung. Das Blitzlicht kommt dann ungefähr 0,4–2,6 s vor dem Donner.</div>
+      </div>
+      <div class="setting">
+        <label><span>Blitzlicht ↔ Donner-Korrektur</span><span id="syncLabel">0 ms</span></label>
+        <div class="range-with-reset">
+          <input id="sync" type="range" min="-1500" max="1500" value="0" step="10">
+          <button id="syncZero" class="zero" type="button" title="Korrektur auf exakt 0 ms setzen">0 ms</button>
+        </div>
+        <div class="small">Nur Geräte-/Cast-Kalibrierung: negativ = Blitzlicht früher · positiv = später. In der Mitte rastet der Regler auf 0 ms ein; der 0-ms-Button setzt jederzeit exakt zurück.</div>
+      </div>
+      <div class="setting">
+        <label><span>Dauer</span><span></span></label>
+        <select id="duration">
+          <option value="0">Endlos</option>
+          <option value="15">15 Minuten</option>
+          <option value="30">30 Minuten</option>
+          <option value="60">60 Minuten</option>
+          <option value="90">90 Minuten</option>
+        </select>
+        <div class="small">Endlos erzeugt fortlaufend neue 15-Minuten-Blöcke mit neuer Zufalls-Timeline.</div>
+      </div>
+      <div class="setting">
+        <label><span>Sanftes Session-Ende</span><span></span></label>
+        <select id="gentleEnd">
+          <option value="0">Aus · sofort</option>
+          <option value="5">Sanft · 5 Sekunden</option>
+          <option value="8" selected>Sanft · 8 Sekunden</option>
+          <option value="12">Sehr sanft · 12 Sekunden</option>
+        </select>
+        <div class="small">Stoppt neue Blitze sofort, blendet Regen und Lagerfeuer aus und stellt danach die vorherigen Lichtzustände wieder her.</div>
+      </div>
+    </div>
+    <p class="small" style="margin-bottom:0">Alle Werte in diesem Bereich werden automatisch persistent gespeichert und nach einem Add-on-/Home-Assistant-Neustart wiederhergestellt. Lautstärke, Intensität, Timing, Dauer und sanftes Ende gelten ab der nächsten Session; die Sync-Korrektur wirkt auch auf kommende Ereignisse einer laufenden Session.</p>
+  </section>
+
+  <section class="card cozy">
+    <h3>🔥 Wohnzimmer gemütlich</h3>
+    <div class="setting" style="margin-bottom:12px">
+      <div class="switchline">
+        <div>
+          <strong>Parallel zum Gewitter mitstarten</strong>
+          <div class="small">Wohnzimmer-Lichtszene + optional ein zweiter Video-Stream mit Lagerfeuer.</div>
+        </div>
+        <input id="cozyEnabled" type="checkbox" aria-label="Wohnzimmer-Atmosphäre mitstarten">
+      </div>
+    </div>
+    <div class="row"><span class="label">Licht</span><span id="cozyLightStatus" class="value">—</span></div>
+    <div class="row"><span class="label">Lagerfeuer-TV</span><span id="cozyMediaStatus" class="value">—</span></div>
+    <div class="row"><span class="label">Lagerfeuer-Medium</span><span id="fireplaceMediaStatus" class="value">—</span></div>
+    <div class="buttons" style="margin-top:14px">
+      <button id="cozyTest" class="fire">🔥 Wohnzimmer testen</button>
+      <button id="cozyRestore" class="secondary">↩ Wohnzimmer zurücksetzen</button>
+    </div>
+    <p class="small" style="margin-bottom:0">Wenn keine HA-Szene eingetragen ist, nutzt das Add-on einen eingebauten Cozy-Look: erste Lampe warm-orange bei 28 %, weitere Lampen warmweiß bei 38 %. Vorherige Lichtzustände werden per temporärer Home-Assistant-Szene gesichert.</p>
+  </section>
+
+  <section class="card">
+    <h3>Status</h3>
+    <div class="row"><span class="label">Bereit</span><span id="ready" class="value"><span class="dot"></span>—</span></div>
+    <div class="row"><span class="label">MQTT</span><span id="mqtt" class="value"><span class="dot"></span>—</span></div>
+    <div class="row"><span class="label">Zigbee-Lampen</span><span id="lights" class="value">—</span></div>
+    <div class="row"><span class="label">Ermittlung</span><span id="source" class="value">—</span></div>
+    <div class="row"><span class="label">Blitzlicht-Gruppe</span><span id="group" class="value">—</span></div>
+    <div class="row"><span class="label">Mixer</span><span id="audioStatus" class="value">—</span></div>
+    <div class="row"><span class="label">Gewitter-Mediaplayer</span><span id="mediaStatus" class="value">—</span></div>
+    <div class="row"><span class="label">Aktueller Mix</span><span id="mixStatus" class="value">—</span></div>
+  </section>
+
+  <section id="browserCard" class="card">
+    <h3>Browser-Audio</h3>
+    <p class="small">Nur als Fallback, wenn Mediaplayer-Audio deaktiviert ist. Beim Nest Hub wird weiterhin genau ein serverseitig gemischter MP3-Stream verwendet.</p>
+    <button id="unlock" class="secondary" style="width:100%">🔊 Browser-Audio aktivieren</button>
+  </section>
+
+  <section class="card small">
+    <strong>Original Strong bleibt geschützt:</strong> Blau XY 0.1691/0.0441 · Basis 127 · Regen 254 · 0,4 s Transition · 1–2 s Zufall · 5–10 Zyklen · max. 10 Lampen · Blitzlicht XY 0.3227/0.3290 · Rückkehr nach 125 ms mit 0,8 s Transition. Die Varianten greifen nur, wenn du sie ausdrücklich auswählst.
+  </section>
+  <div id="message" class="small"></div>
+  <footer class="creator">Creator: Bako</footer>
+</main>
+<script src="static/app-1.3.1.js"></script>
+</body>
+</html>
