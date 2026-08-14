@@ -1,0 +1,180 @@
+
+        intensity_config = {
+            "name": "Storm Intensity",
+            "unique_id": "strong_thunderstorm_intensity",
+            "command_topic": f"{CONTROL_PREFIX}/settings/intensity/command",
+            "state_topic": f"{CONTROL_PREFIX}/settings/intensity/state",
+            "options": ["Original Strong", "Ruhiger", "Extrem"],
+            "availability_topic": f"{CONTROL_PREFIX}/availability",
+            "icon": "mdi:weather-hurricane",
+            "device": device,
+        }
+        self.mqtt.publish(
+            f"{DISCOVERY_PREFIX}/select/strong_thunderstorm_intensity/config",
+            json.dumps(intensity_config, separators=(",", ":")), qos=1, retain=True,
+        )
+
+        timing_config = {
+            "name": "Thunder Timing",
+            "unique_id": "strong_thunderstorm_timing",
+            "command_topic": f"{CONTROL_PREFIX}/settings/timing/command",
+            "state_topic": f"{CONTROL_PREFIX}/settings/timing/state",
+            "options": ["Original (~100 ms)", "Realistisch (150-900 m)"],
+            "availability_topic": f"{CONTROL_PREFIX}/availability",
+            "icon": "mdi:map-marker-distance",
+            "device": device,
+        }
+        self.mqtt.publish(
+            f"{DISCOVERY_PREFIX}/select/strong_thunderstorm_timing/config",
+            json.dumps(timing_config, separators=(",", ":")), qos=1, retain=True,
+        )
+
+        gentle_config = {
+            "name": "Sanftes Session-Ende",
+            "unique_id": "strong_thunderstorm_gentle_end",
+            "command_topic": f"{CONTROL_PREFIX}/settings/gentle_end_seconds/command",
+            "state_topic": f"{CONTROL_PREFIX}/settings/gentle_end_seconds/state",
+            "options": ["0", "5", "8", "12"],
+            "availability_topic": f"{CONTROL_PREFIX}/availability",
+            "device": device,
+            "icon": "mdi:weather-sunset-down",
+        }
+        self.mqtt.publish(
+            f"{DISCOVERY_PREFIX}/select/strong_thunderstorm_gentle_end/config",
+            json.dumps(gentle_config, separators=(",", ":")), qos=1, retain=True,
+        )
+
+        cozy_config = {
+            "name": "Cozy Living Room on Start",
+            "unique_id": "strong_thunderstorm_cozy_enabled",
+            "command_topic": f"{CONTROL_PREFIX}/settings/cozy_enabled/command",
+            "state_topic": f"{CONTROL_PREFIX}/settings/cozy_enabled/state",
+            "payload_on": "true",
+            "payload_off": "false",
+            "availability_topic": f"{CONTROL_PREFIX}/availability",
+            "icon": "mdi:fireplace",
+            "device": device,
+        }
+        self.mqtt.publish(
+            f"{DISCOVERY_PREFIX}/switch/strong_thunderstorm_cozy/config",
+            json.dumps(cozy_config, separators=(",", ":")), qos=1, retain=True,
+        )
+
+        next_config = {
+            "name": "Next Thunder",
+            "unique_id": "strong_thunderstorm_next_thunder",
+            "state_topic": f"{CONTROL_PREFIX}/next_thunder",
+            "device_class": "timestamp",
+            "availability_topic": f"{CONTROL_PREFIX}/availability",
+            "icon": "mdi:weather-lightning",
+            "device": device,
+        }
+        self.mqtt.publish(
+            f"{DISCOVERY_PREFIX}/sensor/strong_thunderstorm_next_thunder/config",
+            json.dumps(next_config, separators=(",", ":")), qos=1, retain=True,
+        )
+
+        distance_config = {
+            "name": "Next Thunder Distance",
+            "unique_id": "strong_thunderstorm_next_thunder_distance",
+            "state_topic": f"{CONTROL_PREFIX}/next_thunder_distance",
+            "device_class": "distance",
+            "unit_of_measurement": "m",
+            "availability_topic": f"{CONTROL_PREFIX}/availability",
+            "icon": "mdi:map-marker-distance",
+            "device": device,
+        }
+        self.mqtt.publish(
+            f"{DISCOVERY_PREFIX}/sensor/strong_thunderstorm_next_thunder_distance/config",
+            json.dumps(distance_config, separators=(",", ":")), qos=1, retain=True,
+        )
+
+    def _publish_settings_states(self) -> None:
+        if not self.mqtt_connected:
+            return
+        settings = self.settings_snapshot()
+        for key in ("rain_volume", "thunder_volume", "sync_offset_ms"):
+            self.mqtt.publish(
+                f"{CONTROL_PREFIX}/settings/{key}/state",
+                str(settings[key]), qos=1, retain=True,
+            )
+        label = "Endless" if settings["duration_minutes"] == 0 else f"{settings['duration_minutes']} min"
+        self.mqtt.publish(f"{CONTROL_PREFIX}/settings/duration/state", label, qos=1, retain=True)
+        self.mqtt.publish(
+            f"{CONTROL_PREFIX}/settings/gentle_end_seconds/state",
+            str(settings["gentle_end_seconds"]), qos=1, retain=True,
+        )
+        intensity_label = {"original": "Original Strong", "calm": "Ruhiger", "extreme": "Extrem"}[settings["storm_intensity"]]
+        timing_label = {"original": "Original (~100 ms)", "realistic": "Realistisch (150-900 m)"}[settings["thunder_timing"]]
+        self.mqtt.publish(f"{CONTROL_PREFIX}/settings/intensity/state", intensity_label, qos=1, retain=True)
+        self.mqtt.publish(f"{CONTROL_PREFIX}/settings/timing/state", timing_label, qos=1, retain=True)
+        self.mqtt.publish(
+            f"{CONTROL_PREFIX}/settings/cozy_enabled/state",
+            "true" if settings["cozy_enabled"] else "false", qos=1, retain=True,
+        )
+
+    async def handle_command(self, command: str) -> None:
+        if command == "ON":
+            await self.start()
+        elif command == "OFF":
+            await self.stop()
+        elif command == "FLASH":
+            await self.flash_once()
+
+    def _publish(self, friendly_name: str, payload: dict[str, Any]) -> bool:
+        if not self.mqtt_connected:
+            logging.warning("Skip MQTT publish while disconnected: %s", friendly_name)
+            return False
+        topic = f"{self.z2m_base}/{friendly_name}/set"
+        info = self.mqtt.publish(topic, json.dumps(payload, separators=(",", ":")), qos=0, retain=False)
+        if info.rc != mqtt.MQTT_ERR_SUCCESS:
+            logging.warning("MQTT publish failed for %s: rc=%s", friendly_name, info.rc)
+            return False
+        return True
+
+    def _publish_all(self, payload: dict[str, Any], prefer_group: bool = True) -> None:
+        if prefer_group and self.lightning_group:
+            self._publish(self.lightning_group, payload)
+            return
+        targets = self.session_lights or self.lights
+        for name in targets:
+            self._publish(name, payload)
+
+    async def _sleep(self, seconds: float) -> bool:
+        end = self.loop.time() + seconds
+        while self.running:
+            remaining = end - self.loop.time()
+            if remaining <= 0:
+                return True
+            await asyncio.sleep(min(remaining, 0.05))
+        return False
+
+    async def _snapshot_states(self, lights: list[str] | None = None) -> None:
+        targets = list(lights if lights is not None else (self.session_lights or self.lights))
+        self.snapshots = {}
+        if not targets:
+            return
+        with self._state_lock:
+            for name in targets:
+                self.last_states.pop(name, None)
+        get_payload = {"state": "", "brightness": "", "color": "", "color_temp": ""}
+        for name in targets:
+            self.mqtt.publish(
+                f"{self.z2m_base}/{name}/get",
+                json.dumps(get_payload, separators=(",", ":")), qos=0, retain=False,
+            )
+            await asyncio.sleep(0.06)
+        await asyncio.sleep(1.0)
+        with self._state_lock:
+            for name in targets:
+                state = self.last_states.get(name)
+                if state:
+                    self.snapshots[name] = dict(state)
+        logging.info("Captured %d/%d Zigbee2MQTT states", len(self.snapshots), len(targets))
+
+    def _restore_payload(self, state: dict[str, Any]) -> dict[str, Any]:
+        if str(state.get("state", "ON")).upper() == "OFF":
+            return {"state": "OFF", "transition": 0.4}
+        payload: dict[str, Any] = {"state": "ON", "transition": 0.4}
+        if isinstance(state.get("brightness"), (int, float)):
+            payload["brightness"] = state["brightness"]
