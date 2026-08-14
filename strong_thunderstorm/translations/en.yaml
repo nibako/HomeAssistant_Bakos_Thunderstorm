@@ -31,7 +31,7 @@ configuration:
     description: 0 means endless; otherwise 15, 30, 60 or 90 minutes.
   storm_intensity:
     name: Storm intensity
-    description: Original keeps Strong unchanged. Calm and Extreme are optional density variants.
+    description: Original keeps the original behavior unchanged. Calm and Extreme are optional density variants.
   thunder_timing:
     name: Thunder timing
     description: Original uses about 100 ms light lead. Realistic simulates roughly 150 to 900 metres distance per thunder.
