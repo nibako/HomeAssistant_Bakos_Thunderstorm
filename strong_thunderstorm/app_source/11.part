@@ -1,0 +1,180 @@
+                rain_volume=settings["rain_volume"],
+                thunder_volume=settings["thunder_volume"],
+                initial_block=True,
+                previous_thunder=None,
+                rain_offset_seconds=0.0,
+                fade_out_seconds=3.0,
+                filename_prefix="test-mix",
+                explicit_timeline=timeline,
+            )
+            ok = await self._media_play_block(block)
+            return (True, "24-second dynamic rain+thunder test is playing") if ok else (False, "play_media failed")
+        except Exception as exc:
+            logging.exception("Could not generate test mix")
+            return False, f"test mix failed: {exc}"
+        finally:
+            self.mixing = False
+            await self.broadcast_status()
+
+    async def emit(self, payload: dict[str, Any]) -> None:
+        dead: list[web.WebSocketResponse] = []
+        for ws in list(self.websockets):
+            try:
+                await ws.send_json(payload)
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            self.websockets.discard(ws)
+
+    def status(self) -> dict[str, Any]:
+        group_ready = self.group_found if self.lightning_group else bool(self.manual_lights)
+        ready = self.mqtt_connected and bool(self.lights) and group_ready and (self.assets_ready or not self.media_player_audio)
+        settings = self.settings_snapshot()
+        return {
+            "version": APP_VERSION,
+            "ready": ready,
+            "running": self.running,
+            "ending": self.ending,
+            "mixing": self.mixing,
+            "mqtt_connected": self.mqtt_connected,
+            "assets_ready": self.assets_ready,
+            "browser_audio": self.browser_audio and not self.media_player_audio,
+            "browser_audio_configured": self.browser_audio,
+            "media_player_audio": self.media_player_audio,
+            "audio_mode": "dynamic_cast" if self.media_player_audio else ("browser" if self.browser_audio else "none"),
+            "media_player": self.media_player,
+            "cozy_active": self._cozy_active,
+            "cozy_scene": self.cozy_scene,
+            "cozy_lights": self.cozy_lights,
+            "cozy_media_player": self.cozy_media_player,
+            "fireplace_media": self.fireplace_media,
+            "fireplace_volume": self.fireplace_volume,
+            "cozy_restore_on_stop": self.cozy_restore_on_stop,
+            "lights": self.lights,
+            "light_count": len(self.lights),
+            "session_light_count": len(self.session_lights),
+            "light_source": self.light_source,
+            "lightning_group": self.lightning_group,
+            "group_found": self.group_found,
+            "group_member_count": len(self.group_member_ieees),
+            "snapshot_count": len(self.snapshots),
+            "settings": settings,
+            "current_mix": {
+                "filename": self._current_block.filename if self._current_block else None,
+                "duration_seconds": self._current_block.duration if self._current_block else None,
+                "thunder_events": len(self._current_block.timeline) if self._current_block else 0,
+                "intensity": settings.get("storm_intensity", "original"),
+                "timing": settings.get("thunder_timing", "original"),
+            },
+            "original_parameters": {
+                "base_xy": [BASE_COLOR["x"], BASE_COLOR["y"]],
+                "base_brightness": BASE_BRIGHTNESS,
+                "rain_xy": [RAIN_COLOR["x"], RAIN_COLOR["y"]],
+                "rain_brightness": RAIN_BRIGHTNESS,
+                "rain_transition_seconds": RAIN_TRANSITION,
+                "rain_frequency_seconds": [1, 2],
+                "lightning_frequency_cycles": [5, 10],
+                "max_rain_lights": MAX_RAIN_LIGHTS,
+                "lightning_xy": [LIGHTNING_COLOR["x"], LIGHTNING_COLOR["y"]],
+                "lightning_return_transition_seconds": LIGHTNING_RETURN_TRANSITION,
+                "rain_audio_fade_in_seconds": RAIN_FADE_IN_SECONDS,
+            },
+        }
+
+    async def broadcast_status(self) -> None:
+        await self.emit({"type": "status", "status": self.status()})
+
+
+async def create_app() -> web.Application:
+    options = load_options()
+    level = getattr(logging, str(options.get("log_level", "info")).upper(), logging.INFO)
+    logging.basicConfig(level=level, format="%(asctime)s %(levelname)s %(message)s")
+    loop = asyncio.get_running_loop()
+    engine = StormEngine(options, loop)
+    await engine.initialize()
+
+    app = web.Application(client_max_size=1024 * 1024)
+    app["engine"] = engine
+
+    async def index(request: web.Request) -> web.FileResponse:
+        response = web.FileResponse(WEB_DIR / "index.html")
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        return response
+
+    async def api_status(request: web.Request) -> web.Response:
+        return web.json_response(engine.status())
+
+    async def api_settings(request: web.Request) -> web.Response:
+        return web.json_response({"ok": True, "settings": engine.settings_snapshot(), "status": engine.status()})
+
+    async def api_settings_update(request: web.Request) -> web.Response:
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            return web.json_response({"ok": False, "message": "JSON object expected"}, status=400)
+        messages = []
+        for key in DEFAULT_SETTINGS:
+            if key in payload:
+                ok, message = engine.update_setting(key, payload[key])
+                if not ok:
+                    return web.json_response({"ok": False, "message": message, "status": engine.status()}, status=400)
+                messages.append(message)
+        return web.json_response({"ok": True, "message": "; ".join(dict.fromkeys(messages)) or "unchanged", "settings": engine.settings_snapshot(), "status": engine.status()})
+
+    async def api_start(request: web.Request) -> web.Response:
+        ok, message = await engine.start()
+        return web.json_response({"ok": ok, "message": message, "status": engine.status()}, status=200 if ok else 409)
+
+    async def api_stop(request: web.Request) -> web.Response:
+        ok, message = await engine.stop()
+        return web.json_response({"ok": ok, "message": message, "status": engine.status()})
+
+    async def api_flash(request: web.Request) -> web.Response:
+        ok, message = await engine.flash_once()
+        return web.json_response({"ok": ok, "message": message, "status": engine.status()}, status=200 if ok else 409)
+
+    async def api_test_media_mix(request: web.Request) -> web.Response:
+        ok, message = await engine.test_media_mix()
+        return web.json_response({"ok": ok, "message": message, "status": engine.status()}, status=200 if ok else 409)
+
+    async def api_test_cozy_start(request: web.Request) -> web.Response:
+        ok, message = await engine.test_cozy_start()
+        return web.json_response({"ok": ok, "message": message, "status": engine.status()}, status=200 if ok else 409)
+
+    async def api_test_cozy_stop(request: web.Request) -> web.Response:
+        ok, message = await engine.test_cozy_stop()
+        return web.json_response({"ok": ok, "message": message, "status": engine.status()}, status=200 if ok else 409)
+
+    async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
+        ws = web.WebSocketResponse(heartbeat=20)
+        await ws.prepare(request)
+        engine.websockets.add(ws)
+        await ws.send_json({"type": "status", "status": engine.status()})
+        if engine.running:
+            await ws.send_json({"type": "storm_started", "browser_audio": engine.browser_audio and not engine.media_player_audio})
+        try:
+            async for message in ws:
+                if message.type == web.WSMsgType.TEXT and message.data == "status":
+                    await ws.send_json({"type": "status", "status": engine.status()})
+        finally:
+            engine.websockets.discard(ws)
+        return ws
+
+    async def audio(request: web.Request) -> web.StreamResponse:
+        name = request.match_info["name"]
+        if name not in SOURCE_AUDIO_FILES:
+            raise web.HTTPNotFound()
+        path = MEDIA_DIR / name
+        if not path.is_file():
+            raise web.HTTPNotFound(text="Bundled Strong Thunderstorm audio is unavailable.")
+        response = web.FileResponse(path)
+        response.content_type = "audio/mp4"
+        return response
+
+    async def health(request: web.Request) -> web.Response:
+        status = engine.status()
+        return web.json_response(
+            {
+                "ok": bool(status["mqtt_connected"]),
+                "mqtt": status["mqtt_connected"],
