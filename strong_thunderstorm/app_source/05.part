@@ -4,7 +4,7 @@
             "unique_id": "strong_thunderstorm_intensity",
             "command_topic": f"{CONTROL_PREFIX}/settings/intensity/command",
             "state_topic": f"{CONTROL_PREFIX}/settings/intensity/state",
-            "options": ["Original Strong", "Ruhiger", "Extrem"],
+            "options": ["Original", "Ruhiger", "Extrem"],
             "availability_topic": f"{CONTROL_PREFIX}/availability",
             "icon": "mdi:weather-hurricane",
             "device": device,
@@ -104,7 +104,7 @@
             f"{CONTROL_PREFIX}/settings/gentle_end_seconds/state",
             str(settings["gentle_end_seconds"]), qos=1, retain=True,
         )
-        intensity_label = {"original": "Original Strong", "calm": "Ruhiger", "extreme": "Extrem"}[settings["storm_intensity"]]
+        intensity_label = {"original": "Original", "calm": "Ruhiger", "extreme": "Extrem"}[settings["storm_intensity"]]
         timing_label = {"original": "Original (~100 ms)", "realistic": "Realistisch (150-900 m)"}[settings["thunder_timing"]]
         self.mqtt.publish(f"{CONTROL_PREFIX}/settings/intensity/state", intensity_label, qos=1, retain=True)
         self.mqtt.publish(f"{CONTROL_PREFIX}/settings/timing/state", timing_label, qos=1, retain=True)
