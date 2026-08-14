@@ -1,0 +1,179 @@
+        self._cozy_snapshot_scene = "scene.strong_thunderstorm_cozy_before"
+        self._cozy_media_original_volume: float | None = None
+        self._cozy_media_was_off = False
+
+        self.settings = self._load_runtime_settings()
+        self.settings_lock = threading.Lock()
+
+        self.running = False
+        self.ending = False
+        self.mixing = False
+        self.mqtt_connected = False
+        self.assets_ready = False
+        self.last_thunder: str | None = None
+        self.last_states: dict[str, dict[str, Any]] = {}
+        self.snapshots: dict[str, dict[str, Any]] = {}
+        self.session_lights: list[str] = []
+        self.state_topics: dict[str, str] = {}
+        self._state_lock = threading.Lock()
+        self._meta_lock = threading.Lock()
+        self._op_lock = asyncio.Lock()
+        self._lightning_lock = asyncio.Lock()
+        self._task: asyncio.Task | None = None
+        self._rain_tasks: list[asyncio.Task] = []
+        self._next_block_task: asyncio.Task | None = None
+        self._current_block: MixBlock | None = None
+        self._media_started_monotonic = 0.0
+        self._media_original_volume: float | None = None
+        self._active_mix_settings: dict[str, Any] | None = None
+        self._session_total_seconds: float | None = None
+        self._session_consumed_seconds: float = 0.0
+        self.websockets: set[web.WebSocketResponse] = set()
+        self.ha = HAClient()
+        self.mixer = DynamicMixer(BUNDLED_AUDIO_DIR, MEDIA_DIR)
+
+        self.mqtt = mqtt.Client(client_id="strong-thunderstorm-addon", protocol=mqtt.MQTTv311)
+        user = os.getenv("MQTT_USER", "")
+        password = os.getenv("MQTT_PASSWORD", "")
+        if user:
+            self.mqtt.username_pw_set(user, password)
+        if os.getenv("MQTT_SSL", "false").lower() in ("1", "true", "yes", "on"):
+            self.mqtt.tls_set()
+        self.mqtt.reconnect_delay_set(min_delay=1, max_delay=30)
+        self.mqtt.on_connect = self._on_connect
+        self.mqtt.on_disconnect = self._on_disconnect
+        self.mqtt.on_message = self._on_message
+        self.mqtt.will_set(f"{CONTROL_PREFIX}/availability", "offline", qos=1, retain=True)
+
+    def _load_runtime_settings(self) -> dict[str, Any]:
+        defaults: dict[str, Any] = dict(DEFAULT_SETTINGS)
+        # Supervisor options are the initial defaults for a fresh install.
+        for key in DEFAULT_SETTINGS:
+            if key in self.options:
+                defaults[key] = self.options[key]
+        try:
+            if SETTINGS_PATH.is_file():
+                loaded = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    defaults.update({k: loaded[k] for k in DEFAULT_SETTINGS if k in loaded})
+        except Exception:
+            logging.exception("Could not read runtime settings; using defaults")
+        defaults["rain_volume"] = int(clamp(float(defaults["rain_volume"]), 0, 100))
+        defaults["thunder_volume"] = int(clamp(float(defaults["thunder_volume"]), 0, 100))
+        defaults["sync_offset_ms"] = int(clamp(float(defaults["sync_offset_ms"]), -1500, 1500))
+        if int(defaults["duration_minutes"]) not in DURATION_OPTIONS:
+            defaults["duration_minutes"] = 0
+        defaults["duration_minutes"] = int(defaults["duration_minutes"])
+        intensity = str(defaults.get("storm_intensity", "original"))
+        defaults["storm_intensity"] = intensity if intensity in INTENSITY_OPTIONS else "original"
+        timing = str(defaults.get("thunder_timing", "original"))
+        defaults["thunder_timing"] = timing if timing in TIMING_OPTIONS else "original"
+        defaults["cozy_enabled"] = bool(defaults.get("cozy_enabled", False))
+        gentle = int(defaults.get("gentle_end_seconds", DEFAULT_GENTLE_END_SECONDS))
+        defaults["gentle_end_seconds"] = gentle if gentle in GENTLE_END_OPTIONS else DEFAULT_GENTLE_END_SECONDS
+        return defaults
+
+    def _save_runtime_settings(self) -> None:
+        """Persist UI/runtime settings atomically in the add-on's persistent /data volume."""
+        SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = SETTINGS_PATH.with_suffix(".json.tmp")
+        payload = json.dumps(self.settings, indent=2, sort_keys=True) + "\n"
+        with tmp.open("w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, SETTINGS_PATH)
+
+    def update_setting(self, key: str, value: Any) -> tuple[bool, str]:
+        with self.settings_lock:
+            if key == "rain_volume":
+                parsed: Any = int(clamp(float(value), 0, 100))
+            elif key == "thunder_volume":
+                parsed = int(clamp(float(value), 0, 100))
+            elif key == "sync_offset_ms":
+                parsed = int(clamp(float(value), -1500, 1500))
+            elif key == "duration_minutes":
+                parsed = int(value)
+                if parsed not in DURATION_OPTIONS:
+                    return False, "duration must be 0, 15, 30, 60 or 90 minutes"
+            elif key == "storm_intensity":
+                parsed = str(value)
+                if parsed not in INTENSITY_OPTIONS:
+                    return False, "storm_intensity must be original, calm or extreme"
+            elif key == "thunder_timing":
+                parsed = str(value)
+                if parsed not in TIMING_OPTIONS:
+                    return False, "thunder_timing must be original or realistic"
+            elif key == "cozy_enabled":
+                parsed = bool(value) if isinstance(value, bool) else str(value).lower() in {"1", "true", "yes", "on"}
+            elif key == "gentle_end_seconds":
+                parsed = int(value)
+                if parsed not in GENTLE_END_OPTIONS:
+                    return False, "gentle_end_seconds must be 0, 5, 8 or 12"
+            else:
+                return False, f"unknown setting {key}"
+            self.settings[key] = parsed
+            self._save_runtime_settings()
+        self._publish_settings_states()
+        asyncio.run_coroutine_threadsafe(self.broadcast_status(), self.loop)
+        if self.running and key in {"rain_volume", "thunder_volume", "duration_minutes", "storm_intensity", "thunder_timing", "cozy_enabled", "gentle_end_seconds"}:
+            return True, "saved; applies to the next storm session"
+        if self.running and key == "sync_offset_ms":
+            return True, "saved; sync correction applies to upcoming lightning events"
+        return True, "saved"
+
+    def settings_snapshot(self) -> dict[str, Any]:
+        with self.settings_lock:
+            return dict(self.settings)
+
+    async def initialize(self) -> None:
+        await self.ha.start()
+        self.mixer.cleanup_session_files()
+        self.assets_ready = await asyncio.to_thread(self.mixer.prepare)
+        host = os.getenv("MQTT_HOST", "core-mosquitto")
+        port = int(os.getenv("MQTT_PORT", "1883"))
+        logging.info("Strong Thunderstorm %s", APP_VERSION)
+        logging.info("Persistent session settings loaded: %s", self.settings_snapshot())
+        logging.info("Connecting to MQTT service at %s:%s", host, port)
+        self.mqtt.connect_async(host, port, keepalive=30)
+        self.mqtt.loop_start()
+
+    async def shutdown(self) -> None:
+        await self.stop(fade_audio=False)
+        try:
+            self.mqtt.publish(f"{CONTROL_PREFIX}/availability", "offline", qos=1, retain=True)
+            self.mqtt.disconnect()
+            self.mqtt.loop_stop()
+        finally:
+            await self.ha.close()
+
+    def _on_connect(self, client, userdata, flags, rc) -> None:
+        if rc != 0:
+            logging.error("MQTT connection failed: %s", rc)
+            return
+        self.mqtt_connected = True
+        logging.info("MQTT connected")
+        client.subscribe(f"{CONTROL_PREFIX}/command", qos=1)
+        client.subscribe(f"{CONTROL_PREFIX}/settings/+/command", qos=1)
+        client.subscribe(f"{self.z2m_base}/bridge/groups", qos=1)
+        client.subscribe(f"{self.z2m_base}/bridge/devices", qos=1)
+        for topic in list(self.state_topics):
+            client.subscribe(topic, qos=0)
+        client.publish(f"{CONTROL_PREFIX}/availability", "online", qos=1, retain=True)
+        client.publish(f"{CONTROL_PREFIX}/state", "ON" if self.running else "OFF", qos=1, retain=True)
+        self._publish_discovery()
+        self._publish_settings_states()
+        asyncio.run_coroutine_threadsafe(self.broadcast_status(), self.loop)
+
+    def _on_disconnect(self, client, userdata, rc) -> None:
+        self.mqtt_connected = False
+        logging.warning("MQTT disconnected: %s", rc)
+        asyncio.run_coroutine_threadsafe(self.broadcast_status(), self.loop)
+
+    def _on_message(self, client, userdata, msg) -> None:
+        try:
+            payload_text = msg.payload.decode("utf-8", errors="replace")
+            if msg.topic == f"{CONTROL_PREFIX}/command":
+                command = payload_text.strip().upper()
+                asyncio.run_coroutine_threadsafe(self.handle_command(command), self.loop)
+                return
