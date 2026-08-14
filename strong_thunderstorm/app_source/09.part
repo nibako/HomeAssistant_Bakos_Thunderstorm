@@ -1,0 +1,179 @@
+        settings = self._active_mix_settings or self.settings_snapshot()
+        if str(settings.get("thunder_timing", "original")) == "realistic":
+            distance = random.uniform(REALISTIC_DISTANCE_MIN_M, REALISTIC_DISTANCE_MAX_M)
+            return distance / SPEED_OF_SOUND_M_S, int(round(distance))
+        return ORIGINAL_LIGHT_LEAD_SECONDS, None
+
+    async def _lightning(self) -> None:
+        async with self._lightning_lock:
+            if not self.running:
+                return
+            thunder = self._choose_thunder()
+            base_lead, distance_m = self._browser_light_lead_seconds()
+            sync_seconds = self.settings_snapshot()["sync_offset_ms"] / 1000.0
+            effective_lead = base_lead - sync_seconds
+            event_payload = {
+                "type": "thunder",
+                "file": thunder["file"],
+                "brightness": thunder["brightness"],
+            }
+            if distance_m is not None:
+                event_payload["distance_m"] = distance_m
+
+            if effective_lead < 0:
+                await self.emit(event_payload)
+                if not await self._sleep(-effective_lead):
+                    return
+                self._publish_all(
+                    {"state": "ON", "brightness": thunder["brightness"], "color": LIGHTNING_COLOR, "transition": 0}
+                )
+                if not await self._sleep(LIGHTNING_RETURN_DELAY):
+                    return
+                self._publish_all(
+                    {"state": "ON", "brightness": BASE_BRIGHTNESS, "color": BASE_COLOR, "transition": LIGHTNING_RETURN_TRANSITION}
+                )
+                return
+
+            self._publish_all(
+                {"state": "ON", "brightness": thunder["brightness"], "color": LIGHTNING_COLOR, "transition": 0}
+            )
+            if effective_lead <= LIGHTNING_RETURN_DELAY:
+                if effective_lead and not await self._sleep(effective_lead):
+                    return
+                await self.emit(event_payload)
+                remaining = LIGHTNING_RETURN_DELAY - max(0.0, effective_lead)
+                if remaining and not await self._sleep(remaining):
+                    return
+                self._publish_all(
+                    {"state": "ON", "brightness": BASE_BRIGHTNESS, "color": BASE_COLOR, "transition": LIGHTNING_RETURN_TRANSITION}
+                )
+            else:
+                if not await self._sleep(LIGHTNING_RETURN_DELAY):
+                    return
+                self._publish_all(
+                    {"state": "ON", "brightness": BASE_BRIGHTNESS, "color": BASE_COLOR, "transition": LIGHTNING_RETURN_TRANSITION}
+                )
+                if not await self._sleep(effective_lead - LIGHTNING_RETURN_DELAY):
+                    return
+                await self.emit(event_payload)
+
+    async def flash_once(self) -> tuple[bool, str]:
+        """Light-only test. Never plays thunder; the UI deliberately calls this Blitzlicht."""
+        if not self.mqtt_connected:
+            return False, "MQTT is not connected"
+        if not self.lights:
+            return False, f"No members resolved for '{self.lightning_group}'"
+
+        thunder = self._choose_thunder()
+        if self.running:
+            self._publish_all(
+                {"state": "ON", "brightness": thunder["brightness"], "color": LIGHTNING_COLOR, "transition": 0}
+            )
+            await asyncio.sleep(LIGHTNING_RETURN_DELAY)
+            self._publish_all(
+                {"state": "ON", "brightness": BASE_BRIGHTNESS, "color": BASE_COLOR, "transition": LIGHTNING_RETURN_TRANSITION}
+            )
+            return True, "light-only test flash"
+
+        test_lights = list(self.lights)
+        await self._snapshot_states(test_lights)
+        test_snapshots = dict(self.snapshots)
+        self._publish_all(
+            {"state": "ON", "brightness": thunder["brightness"], "color": LIGHTNING_COLOR, "transition": 0}
+        )
+        await asyncio.sleep(LIGHTNING_RETURN_DELAY)
+        await self._restore_states(test_snapshots)
+        return True, "light-only test flash completed"
+
+    async def _wait_media_player_ready(self, timeout: float = 12.0) -> bool:
+        if not self.media_player:
+            return False
+        deadline = self.loop.time() + timeout
+        while self.loop.time() < deadline and self.running:
+            state = await self.ha.get_state(self.media_player)
+            if state and str(state.get("state", "")).lower() in {"playing", "buffering"}:
+                logging.info("Media player %s is ready (%s)", self.media_player, state.get("state"))
+                return True
+            await asyncio.sleep(0.25)
+        logging.warning("Media player %s did not report playing within %.1fs", self.media_player, timeout)
+        return False
+
+    async def _media_play_block(self, block: MixBlock) -> bool:
+        if not self.media_player:
+            return False
+        data = {
+            "entity_id": self.media_player,
+            "media_content_id": f"media-source://media_source/local/strong_thunderstorm/{block.filename}",
+            "media_content_type": "audio/mpeg",
+        }
+        ok = await self.ha.call_service("media_player", "play_media", data)
+        if ok:
+            self._media_started_monotonic = self.loop.time()
+        logging.info("Dynamic media play %s on %s: %s", block.filename, self.media_player, "ok" if ok else "failed")
+        return ok
+
+    async def _media_position(self) -> float | None:
+        state = await self.ha.get_state(self.media_player)
+        if not state:
+            return None
+        attrs = state.get("attributes", {})
+        if not isinstance(attrs, dict):
+            return None
+        raw = attrs.get("media_position")
+        if not isinstance(raw, (int, float)):
+            return None
+        pos = float(raw)
+        if str(state.get("state", "")).lower() == "playing":
+            updated = attrs.get("media_position_updated_at")
+            if isinstance(updated, str) and updated:
+                try:
+                    stamp = datetime.fromisoformat(updated.replace("Z", "+00:00"))
+                    if stamp.tzinfo is None:
+                        stamp = stamp.replace(tzinfo=timezone.utc)
+                    pos += max(0.0, (datetime.now(timezone.utc) - stamp.astimezone(timezone.utc)).total_seconds())
+                except ValueError:
+                    pass
+        return pos
+
+    async def _wait_for_media_position(self, target: float, fallback_started: float) -> bool:
+        while self.running:
+            pos = await self._media_position()
+            if pos is None:
+                pos = self.loop.time() - fallback_started
+            remaining = target - pos
+            if remaining <= 0:
+                return True
+            await asyncio.sleep(min(0.20, max(0.03, remaining / 3)))
+        return False
+
+    async def _stop_rain_workers(self) -> None:
+        tasks = list(self._rain_tasks)
+        self._rain_tasks = []
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _start_rain_workers(self) -> None:
+        await self._stop_rain_workers()
+        if not self.running:
+            return
+        targets = list(self.session_lights)
+        random.shuffle(targets)
+        targets = targets[: min(MAX_RAIN_LIGHTS, len(targets))]
+        self._rain_tasks = [
+            asyncio.create_task(
+                self._rain_forever(name, immediate=(idx == 0), stagger=idx * INITIAL_RAIN_STAGGER),
+                name=f"strong-rain-{idx}",
+            )
+            for idx, name in enumerate(targets)
+        ]
+
+    async def _rain_forever(self, name: str, immediate: bool, stagger: float) -> None:
+        try:
+            if stagger and not await self._sleep(stagger):
+                return
+            first = True
+            while self.running:
+                intensity = str((self._active_mix_settings or self.settings_snapshot()).get("storm_intensity", "original"))
