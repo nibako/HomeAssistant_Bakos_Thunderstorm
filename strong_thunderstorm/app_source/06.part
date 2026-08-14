@@ -1,0 +1,180 @@
+        color = state.get("color")
+        if isinstance(color, dict) and isinstance(color.get("x"), (int, float)) and isinstance(color.get("y"), (int, float)):
+            payload["color"] = {"x": color["x"], "y": color["y"]}
+        elif isinstance(state.get("color_temp"), (int, float)):
+            payload["color_temp"] = state["color_temp"]
+        return payload
+
+    async def _restore_states(self, snapshots: dict[str, dict[str, Any]] | None = None) -> None:
+        if not self.restore_on_stop:
+            return
+        states = snapshots if snapshots is not None else self.snapshots
+        for name, state in states.items():
+            self._publish(name, self._restore_payload(state))
+            await asyncio.sleep(0.06)
+
+    async def _apply_builtin_cozy_lights(self) -> None:
+        """Apply a warm, fire-adjacent look without requiring a pre-created HA scene."""
+        if not self.cozy_lights:
+            return
+        for idx, entity_id in enumerate(self.cozy_lights):
+            if idx == 0:
+                # Accent lamp: warm amber/orange, deliberately dim enough to feel like firelight.
+                data = {
+                    "entity_id": entity_id,
+                    "brightness_pct": 28,
+                    "rgb_color": [255, 108, 28],
+                    "transition": 2.5,
+                }
+                ok = await self.ha.call_service("light", "turn_on", data)
+                if not ok:
+                    await self.ha.call_service(
+                        "light", "turn_on",
+                        {"entity_id": entity_id, "brightness_pct": 28, "transition": 2.5},
+                    )
+            else:
+                # Main/floor lamp: steady warm white so the room stays comfortable.
+                data = {
+                    "entity_id": entity_id,
+                    "brightness_pct": 38,
+                    "color_temp_kelvin": 2300,
+                    "transition": 2.5,
+                }
+                ok = await self.ha.call_service("light", "turn_on", data)
+                if not ok:
+                    await self.ha.call_service(
+                        "light", "turn_on",
+                        {"entity_id": entity_id, "brightness_pct": 38, "transition": 2.5},
+                    )
+
+    async def _start_fireplace(self) -> bool:
+        if not self.cozy_media_player or not self.fireplace_media:
+            return False
+        if self.media_player_audio and self.cozy_media_player == self.media_player:
+            logging.warning(
+                "Cozy fireplace media player equals storm media player (%s); skipping fireplace because one Cast target cannot play both streams",
+                self.cozy_media_player,
+            )
+            return False
+        state = await self.ha.get_state(self.cozy_media_player)
+        self._cozy_media_was_off = bool(state and str(state.get("state", "")).lower() == "off")
+        self._cozy_media_original_volume = None
+        if state and isinstance(state.get("attributes"), dict):
+            vol = state["attributes"].get("volume_level")
+            if isinstance(vol, (int, float)):
+                self._cozy_media_original_volume = float(vol)
+        if self._cozy_media_was_off:
+            await self.ha.call_service("media_player", "turn_on", {"entity_id": self.cozy_media_player})
+            await asyncio.sleep(0.8)
+        await self.ha.call_service(
+            "media_player", "volume_set",
+            {"entity_id": self.cozy_media_player, "volume_level": self.fireplace_volume / 100.0},
+        )
+        media_type = "video/mp4" if self.fireplace_media.lower().split("?", 1)[0].endswith(".mp4") else "video"
+        ok = await self.ha.call_service(
+            "media_player", "play_media",
+            {
+                "entity_id": self.cozy_media_player,
+                "media_content_id": self.fireplace_media,
+                "media_content_type": media_type,
+            },
+        )
+        logging.info(
+            "Fireplace media play on %s: %s", self.cozy_media_player, "ok" if ok else "failed"
+        )
+        return ok
+
+    async def _start_cozy_mode(self) -> tuple[bool, str]:
+        if self._cozy_active:
+            return True, "already active"
+        settings = self._active_mix_settings or self.settings_snapshot()
+        if not bool(settings.get("cozy_enabled", False)):
+            return True, "disabled"
+
+        if self.cozy_restore_on_stop and self.cozy_lights:
+            await self.ha.call_service(
+                "scene", "create",
+                {
+                    "scene_id": "strong_thunderstorm_cozy_before",
+                    "snapshot_entities": self.cozy_lights,
+                },
+            )
+
+        light_ok = True
+        if self.cozy_scene:
+            light_ok = await self.ha.call_service(
+                "scene", "turn_on", {"entity_id": self.cozy_scene, "transition": 2.5}
+            )
+        else:
+            await self._apply_builtin_cozy_lights()
+
+        fire_ok = True
+        if self.cozy_media_player and self.fireplace_media:
+            fire_ok = await self._start_fireplace()
+
+        self._cozy_active = True
+        await self.broadcast_status()
+        logging.info(
+            "Cozy living room started (scene=%s, lights=%d, fireplace=%s)",
+            self.cozy_scene or "built-in",
+            len(self.cozy_lights),
+            self.cozy_media_player or "none",
+        )
+        if not light_ok:
+            return False, "cozy scene could not be activated"
+        if self.cozy_media_player and not fire_ok:
+            return True, "cozy lights active; fireplace could not be started"
+        return True, "cozy living room active"
+
+    async def _stop_cozy_mode(self, *, force: bool = False, fade_seconds: float = 0.0) -> tuple[bool, str]:
+        if not self._cozy_active and not force:
+            return True, "already inactive"
+        if not self.cozy_restore_on_stop and not force:
+            self._cozy_active = False
+            await self.broadcast_status()
+            return True, "left active by configuration"
+
+        if self.cozy_media_player:
+            if fade_seconds > 0:
+                await self._fade_entity_volume(
+                    self.cozy_media_player, min(float(fade_seconds), 6.0), self._cozy_media_original_volume
+                )
+            await self.ha.call_service("media_player", "media_stop", {"entity_id": self.cozy_media_player})
+            if self._cozy_media_original_volume is not None:
+                await self.ha.call_service(
+                    "media_player", "volume_set",
+                    {
+                        "entity_id": self.cozy_media_player,
+                        "volume_level": self._cozy_media_original_volume,
+                    },
+                )
+            if self._cozy_media_was_off:
+                await self.ha.call_service("media_player", "turn_off", {"entity_id": self.cozy_media_player})
+
+        if self.cozy_restore_on_stop and self.cozy_lights:
+            await self.ha.call_service(
+                "scene", "turn_on", {"entity_id": self._cozy_snapshot_scene, "transition": max(2.0, min(4.0, float(fade_seconds) / 2.0))}
+            )
+            await asyncio.sleep(0.1)
+            await self.ha.call_service(
+                "scene", "delete", {"entity_id": self._cozy_snapshot_scene}
+            )
+
+        self._cozy_media_original_volume = None
+        self._cozy_media_was_off = False
+        self._cozy_active = False
+        await self.broadcast_status()
+        logging.info("Cozy living room restored/stopped")
+        return True, "cozy living room restored"
+
+    async def test_cozy_start(self) -> tuple[bool, str]:
+        if self.running or self.mixing:
+            return False, "Stop the storm before testing the living room"
+        # Test should work even if the session toggle is currently off.
+        original = self.settings_snapshot().get("cozy_enabled", False)
+        with self.settings_lock:
+            self.settings["cozy_enabled"] = True
+        try:
+            return await self._start_cozy_mode()
+        finally:
+            with self.settings_lock:
