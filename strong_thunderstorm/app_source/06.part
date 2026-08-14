@@ -47,6 +47,39 @@
                         {"entity_id": entity_id, "brightness_pct": 38, "transition": 2.5},
                     )
 
+    def _youtube_cast_payload(self, media: str) -> dict[str, Any] | None:
+        """Convert common YouTube URLs into Home Assistant's native Cast payload."""
+        raw = str(media or "").strip()
+        if not raw:
+            return None
+        try:
+            parsed = urlparse(raw)
+        except ValueError:
+            return None
+        host = (parsed.hostname or "").lower()
+        path = parsed.path or ""
+        query = parse_qs(parsed.query)
+        video_id: str | None = None
+        playlist_id: str | None = None
+
+        if host in {"youtu.be", "www.youtu.be"}:
+            video_id = path.strip("/").split("/", 1)[0] or None
+        elif host in {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com"}:
+            if path.rstrip("/") == "/watch":
+                video_id = (query.get("v") or [None])[0]
+            else:
+                parts = [part for part in path.split("/") if part]
+                if len(parts) >= 2 and parts[0].lower() in {"shorts", "live", "embed"}:
+                    video_id = parts[1]
+            playlist_id = (query.get("list") or [None])[0]
+
+        if not video_id:
+            return None
+        payload: dict[str, Any] = {"app_name": "youtube", "media_id": video_id}
+        if playlist_id:
+            payload["playlist_id"] = playlist_id
+        return payload
+
     async def _start_fireplace(self) -> bool:
         if not self.cozy_media_player or not self.fireplace_media:
             return False
@@ -70,12 +103,25 @@
             "media_player", "volume_set",
             {"entity_id": self.cozy_media_player, "volume_level": self.fireplace_volume / 100.0},
         )
-        media_type = "video/mp4" if self.fireplace_media.lower().split("?", 1)[0].endswith(".mp4") else "video"
+
+        youtube_payload = self._youtube_cast_payload(self.fireplace_media)
+        if youtube_payload:
+            media_content_id = json.dumps(youtube_payload, separators=(",", ":"))
+            media_type = "cast"
+            logging.info(
+                "Starting fireplace through native YouTube Cast app on %s (video=%s)",
+                self.cozy_media_player,
+                youtube_payload.get("media_id"),
+            )
+        else:
+            media_content_id = self.fireplace_media
+            media_type = "video/mp4" if self.fireplace_media.lower().split("?", 1)[0].endswith(".mp4") else "video"
+
         ok = await self.ha.call_service(
             "media_player", "play_media",
             {
                 "entity_id": self.cozy_media_player,
-                "media_content_id": self.fireplace_media,
+                "media_content_id": media_content_id,
                 "media_content_type": media_type,
             },
         )
