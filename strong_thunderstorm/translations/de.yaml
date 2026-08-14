@@ -1,0 +1,64 @@
+configuration:
+  z2m_base_topic:
+    name: Zigbee2MQTT-Basistopic
+    description: Normalerweise zigbee2mqtt.
+  lightning_group:
+    name: Zigbee2MQTT-Blitzlichtgruppe
+    description: Friendly Name der Zigbee2MQTT-Gruppe. Standard ist Thunderstorm-Lights; die Mitglieder werden automatisch erkannt.
+  lights:
+    name: Lampen manuell überschreiben
+    description: Optional. Leer lassen, damit die Lampen automatisch aus der Blitzlichtgruppe ermittelt werden. Sonst exakte Zigbee2MQTT-Friendly-Names eintragen.
+  browser_audio:
+    name: Browser-Audio
+    description: Lokale Audioausgabe im Webinterface. Wird automatisch stummgeschaltet, wenn Mediaplayer-Audio aktiv ist.
+  media_player:
+    name: Gewitter-Mediaplayer
+    description: Optionales entity_id, z. B. media_player.nesthub, für den serverseitig gemischten Regen+Donner-Einzelstream.
+  media_player_audio:
+    name: Gewitter-Mediaplayer-Audio
+    description: Für Nest/Chromecast wird genau ein Regen+Donner-MP3 pro Block erzeugt und abgespielt.
+  rain_volume:
+    name: Regenlautstärke
+    description: Startwert in Prozent. Danach direkt im Webinterface oder über die MQTT-Number-Entity einstellbar.
+  thunder_volume:
+    name: Donnerlautstärke
+    description: Startwert in Prozent. 100 Prozent entspricht dem Originalpegel.
+  sync_offset_ms:
+    name: Blitzlicht-Donner-Korrektur
+    description: "Zusätzliche Geräte-Korrektur in Millisekunden. 0 ms behält den gewählten Timing-Modus bei; negativ lässt das Blitzlicht früher, positiv später erscheinen."
+  duration_minutes:
+    name: Gewitterdauer
+    description: 0 bedeutet Endlos; alternativ 15, 30, 60 oder 90 Minuten.
+  storm_intensity:
+    name: Gewitterintensität
+    description: Original lässt Strong unverändert. Ruhiger und Extrem sind optionale Varianten mit anderer Ereignisdichte.
+  thunder_timing:
+    name: Donner-Timing
+    description: Original nutzt ungefähr 100 ms Lichtvorsprung. Realistisch simuliert pro Donner eine zufällige Entfernung von etwa 150 bis 900 Metern.
+  cozy_enabled:
+    name: Wohnzimmer-Atmosphäre mitstarten
+    description: Aktiviert parallel zum Gewitter die gemütliche Wohnzimmerbeleuchtung und optional ein Lagerfeuer auf einem zweiten Mediaplayer.
+  cozy_scene:
+    name: Wohnzimmer-Szene
+    description: Optional, z. B. scene.wohnzimmer_gemuetlich. Leer lassen für den eingebauten Cozy-Look für die unten eingetragenen Lampen.
+  cozy_lights:
+    name: Wohnzimmer-Lampen
+    description: Optional. Eigene Home-Assistant-Light-Entities eintragen; sie werden vor dem Start gesichert und beim Stop wiederhergestellt.
+  cozy_media_player:
+    name: Wohnzimmer-Fernseher / Mediaplayer
+    description: Optionales entity_id für das Lagerfeuer-Video. Muss ein anderes Gerät als der Gewitter-Mediaplayer sein.
+  fireplace_media:
+    name: Lagerfeuer-Medium
+    description: Media-Source-URI oder direkt erreichbare HTTP(S)-Video-URL. Standard ist media-source://media_source/local/fireplace.mp4.
+  fireplace_volume:
+    name: Lagerfeuer-Lautstärke
+    description: Ziel-Lautstärke des Wohnzimmer-Mediaplayers in Prozent.
+  cozy_restore_on_stop:
+    name: Wohnzimmer beim Stop wiederherstellen
+    description: Stellt die vorherigen Wohnzimmer-Lichtzustände wieder her, stoppt das Lagerfeuer und setzt die vorherige TV-Lautstärke zurück.
+  restore_on_stop:
+    name: Gewitterlampen beim Stop wiederherstellen
+    description: Beim Start erfasste Zigbee2MQTT-Zustände beim Stop wiederherstellen.
+  log_level:
+    name: Log-Level
+    description: Ausführlichkeit des App-Logs.
