@@ -1,0 +1,180 @@
+                self.settings["cozy_enabled"] = original
+
+    async def test_cozy_stop(self) -> tuple[bool, str]:
+        return await self._stop_cozy_mode(force=True)
+
+    def _configure_session_duration(self) -> None:
+        settings = self._active_mix_settings or self.settings_snapshot()
+        minutes = int(settings["duration_minutes"])
+        self._session_total_seconds = None if minutes == 0 else float(minutes * 60)
+        self._session_consumed_seconds = 0.0
+
+    def _next_block_spec(self, projected_consumed: float | None = None) -> tuple[float, bool] | None:
+        consumed = self._session_consumed_seconds if projected_consumed is None else projected_consumed
+        block_seconds = float(SESSION_BLOCK_MINUTES * 60)
+        if self._session_total_seconds is None:
+            return block_seconds, False
+        remaining = self._session_total_seconds - consumed
+        if remaining <= 0.25:
+            return None
+        duration = min(block_seconds, remaining)
+        final = duration >= remaining - 0.25
+        return duration, final
+
+    async def _build_mix_block(
+        self,
+        *,
+        duration_seconds: float,
+        final_block: bool,
+        initial_block: bool,
+        previous_thunder: str | None,
+        rain_offset_seconds: float,
+    ) -> MixBlock:
+        settings = self._active_mix_settings or self.settings_snapshot()
+        return await asyncio.to_thread(
+            self.mixer.build_block,
+            duration_seconds=duration_seconds,
+            light_count=max(1, len(self.session_lights or self.lights)),
+            rain_volume=settings["rain_volume"],
+            thunder_volume=settings["thunder_volume"],
+            initial_block=initial_block,
+            previous_thunder=previous_thunder,
+            rain_offset_seconds=rain_offset_seconds,
+            fade_out_seconds=float(settings.get("gentle_end_seconds", DEFAULT_GENTLE_END_SECONDS)) if final_block else 0.0,
+            intensity=str(settings.get("storm_intensity", "original")),
+            timing_mode=str(settings.get("thunder_timing", "original")),
+        )
+
+    async def start(self) -> tuple[bool, str]:
+        async with self._op_lock:
+            if self.running:
+                return True, "already running"
+            if self.ending:
+                return False, "storm is still ending"
+            if self.mixing:
+                return False, "audio mix is already being generated"
+            if not self.mqtt_connected:
+                return False, "MQTT is not connected"
+            if not self.lights:
+                if self.light_source == "group_auto" and self.lightning_group:
+                    if self.group_found:
+                        return False, f"Group '{self.lightning_group}' has no resolved members"
+                    return False, f"Zigbee2MQTT group '{self.lightning_group}' was not found"
+                return False, "No Zigbee2MQTT lights configured"
+
+            self.mixer.cleanup_session_files()
+            self.session_lights = list(self.lights)
+            self._active_mix_settings = self.settings_snapshot()
+            self._configure_session_duration()
+            first_block: MixBlock | None = None
+            if self.media_player_audio:
+                if not self.assets_ready:
+                    self.session_lights = []
+                    self._active_mix_settings = None
+                    return False, "Dynamic audio mixer is not ready"
+                self.mixing = True
+                await self.broadcast_status()
+                try:
+                    first_spec = self._next_block_spec(0.0)
+                    if not first_spec:
+                        raise RuntimeError("invalid session duration")
+                    first_duration, first_final = first_spec
+                    first_block = await self._build_mix_block(
+                        duration_seconds=first_duration,
+                        final_block=first_final,
+                        initial_block=True,
+                        previous_thunder=None,
+                        rain_offset_seconds=0.0,
+                    )
+                except Exception as exc:
+                    logging.exception("Could not generate session mix")
+                    self.session_lights = []
+                    self._active_mix_settings = None
+                    return False, f"Could not generate session mix: {exc}"
+                finally:
+                    self.mixing = False
+
+            await self._snapshot_states(self.session_lights)
+            cozy_ok, cozy_message = await self._start_cozy_mode()
+            if not cozy_ok:
+                logging.warning("Cozy living room start issue: %s", cozy_message)
+            self.running = True
+            self.ending = False
+            self.last_thunder = None
+            self._current_block = first_block
+            self.mqtt.publish(f"{CONTROL_PREFIX}/state", "ON", qos=1, retain=True)
+            self._publish_all(
+                {"state": "ON", "brightness": BASE_BRIGHTNESS, "color": BASE_COLOR, "transition": 0}
+            )
+
+            browser_audio_effective = self.browser_audio and not self.media_player_audio
+            await self.emit(
+                {
+                    "type": "storm_started",
+                    "browser_audio": browser_audio_effective,
+                    "audio_mode": "dynamic_cast" if self.media_player_audio else ("browser" if browser_audio_effective else "none"),
+                }
+            )
+
+            if self.media_player_audio:
+                assert first_block is not None
+                state = await self.ha.get_state(self.media_player)
+                if state and isinstance(state.get("attributes"), dict):
+                    vol = state["attributes"].get("volume_level")
+                    if isinstance(vol, (int, float)):
+                        self._media_original_volume = float(vol)
+                ok = await self._media_play_block(first_block)
+                if not ok:
+                    self.running = False
+                    await self._stop_cozy_mode(force=True)
+                    await self._restore_states()
+                    self.session_lights = []
+                    self._active_mix_settings = None
+                    self.mqtt.publish(f"{CONTROL_PREFIX}/state", "OFF", qos=1, retain=True)
+                    return False, f"Could not start generated mix on {self.media_player}"
+                await self._wait_media_player_ready(timeout=12.0)
+                self._task = asyncio.create_task(self._run_dynamic_media(), name="strong-thunderstorm-dynamic")
+            else:
+                self._task = asyncio.create_task(self._run_original(), name="strong-thunderstorm")
+
+            await self.broadcast_status()
+            logging.info(
+                "Strong Thunderstorm started with %d lights (group=%s, audio=%s, duration=%s)",
+                len(self.session_lights),
+                self.lightning_group or "none",
+                "dynamic single Cast stream" if self.media_player_audio else ("browser" if browser_audio_effective else "none"),
+                "endless" if self._active_mix_settings and self._active_mix_settings["duration_minutes"] == 0 else f"{self._active_mix_settings['duration_minutes']} min",
+            )
+            return True, "started"
+
+    async def _fade_entity_volume(self, entity_id: str, seconds: float, fallback_volume: float | None = None) -> None:
+        if not entity_id or seconds <= 0:
+            return
+        state = await self.ha.get_state(entity_id)
+        start_volume: float | None = None
+        if state and isinstance(state.get("attributes"), dict):
+            raw = state["attributes"].get("volume_level")
+            if isinstance(raw, (int, float)):
+                start_volume = float(raw)
+        if start_volume is None:
+            start_volume = fallback_volume
+        if start_volume is None:
+            return
+        steps = max(5, min(30, int(round(seconds * 4))))
+        delay = seconds / steps
+        for step in range(steps, -1, -1):
+            factor = step / steps
+            await self.ha.call_service(
+                "media_player", "volume_set",
+                {"entity_id": entity_id, "volume_level": max(0.0, start_volume * factor)},
+            )
+            if step:
+                await asyncio.sleep(delay)
+
+    async def _fade_media_player_out(self, seconds: float) -> None:
+        if not self.media_player:
+            return
+        await self._fade_entity_volume(self.media_player, seconds, self._media_original_volume)
+
+    async def stop(self, fade_audio: bool = True, *, natural_end: bool = False) -> tuple[bool, str]:
+        async with self._op_lock:
