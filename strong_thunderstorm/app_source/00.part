@@ -18,7 +18,7 @@ import numpy as np
 from aiohttp import ClientSession, web
 import paho.mqtt.client as mqtt
 
-APP_VERSION = "1.3.1"
+APP_VERSION = "1.3.2"
 DATA_DIR = Path("/data")
 OPTIONS_PATH = DATA_DIR / "options.json"
 SETTINGS_PATH = DATA_DIR / "runtime-settings.json"
@@ -30,7 +30,7 @@ HA_API = "http://supervisor/core/api"
 CONTROL_PREFIX = "strong_thunderstorm"
 DISCOVERY_PREFIX = "homeassistant"
 
-# Reconstructed Strong Thunderstorm light parameters. These are deliberately kept
+# Reconstructed Bako's Thunderstorm light parameters. These are deliberately kept
 # unchanged from the stable 1.0.3 light engine.
 BASE_COLOR = {"x": 0.1691, "y": 0.0441}
 BASE_BRIGHTNESS = 127
@@ -84,12 +84,12 @@ REALISTIC_DISTANCE_MIN_M = 150.0
 REALISTIC_DISTANCE_MAX_M = 900.0
 
 INTENSITY_PROFILES = {
-    # The original profile is the reconstructed Strong behavior and must stay unchanged.
+    # The original profile is the reconstructed original behavior and must stay unchanged.
     "original": {
         "cycles": (5, 10),
         "rain_delay": (1.0, 2.0),
         "weights": (0.12, 0.12, 0.38, 0.38),
-        "label": "Original Strong",
+        "label": "Original",
     },
     # Optional variants. They reuse the same colors/transitions; only event density and
     # thunder mix weighting are changed.
@@ -154,7 +154,7 @@ class DynamicMixer:
         PCM_DIR.mkdir(parents=True, exist_ok=True)
         missing = [name for name in sorted(SOURCE_AUDIO_FILES) if not (self.source_dir / name).is_file()]
         if missing:
-            logging.error("Bundled Strong audio is incomplete: %s", missing)
+            logging.error("Bundled Bako's Thunderstorm audio is incomplete: %s", missing)
             return False
         if not shutil.which("ffmpeg"):
             logging.error("ffmpeg is not installed")
