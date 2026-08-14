@@ -77,7 +77,7 @@
             self.mqtt.publish(f"{CONTROL_PREFIX}/state", "OFF", qos=1, retain=True)
             self.mixer.cleanup_session_files()
             await self.broadcast_status()
-            logging.info("Strong Thunderstorm stopped%s", " with gentle ending" if gentle_seconds > 0 else "")
+            logging.info("Bako's Thunderstorm stopped%s", " with gentle ending" if gentle_seconds > 0 else "")
             return True, "stopped"
 
     # --- Stable 1.0.3 light engine path (browser/no Cast) ---
