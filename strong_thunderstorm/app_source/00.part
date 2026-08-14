@@ -178,6 +178,3 @@ class DynamicMixer:
                         needs_decode = not (
                             int(meta.get("source_size", -1)) == source.stat().st_size
                             and int(meta.get("sample_rate", 0)) == SAMPLE_RATE
-                            and int(meta.get("channels", 0)) == CHANNELS
-                            and raw.stat().st_size > 0
-                        )
