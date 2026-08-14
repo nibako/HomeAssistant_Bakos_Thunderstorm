@@ -8,7 +8,7 @@
                     raw_value = labels.get(str(raw_value), raw_value)
                 elif key == "intensity":
                     key = "storm_intensity"
-                    labels = {"Original Strong": "original", "Ruhiger": "calm", "Extrem": "extreme"}
+                    labels = {"Original": "original", "Original Strong": "original", "Ruhiger": "calm", "Extrem": "extreme"}
                     raw_value = labels.get(str(raw_value), raw_value)
                 elif key == "timing":
                     key = "thunder_timing"
@@ -102,8 +102,8 @@
     def _discovery_device(self) -> dict[str, Any]:
         return {
             "identifiers": ["strong_thunderstorm_addon"],
-            "name": "Strong Thunderstorm",
-            "manufacturer": "Local Strong Thunderstorm port",
+            "name": "Bako's Thunderstorm",
+            "manufacturer": "Bako",
             "model": "Zigbee2MQTT dynamic storm engine",
             "sw_version": APP_VERSION,
         }
@@ -111,7 +111,7 @@
     def _publish_discovery(self) -> None:
         device = self._discovery_device()
         switch_config = {
-            "name": "Strong Thunderstorm",
+            "name": "Bako's Thunderstorm",
             "unique_id": "strong_thunderstorm_effect",
             "command_topic": f"{CONTROL_PREFIX}/command",
             "state_topic": f"{CONTROL_PREFIX}/state",
