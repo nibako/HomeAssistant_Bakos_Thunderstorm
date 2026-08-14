@@ -1,0 +1,36 @@
+                "group_found": status["group_found"],
+                "light_count": status["light_count"],
+                "mixer_ready": status["assets_ready"],
+                "version": APP_VERSION,
+            },
+            status=200 if status["mqtt_connected"] else 503,
+        )
+
+    app.router.add_get("/", index)
+    app.router.add_get("/api/status", api_status)
+    app.router.add_get("/api/settings", api_settings)
+    app.router.add_post("/api/settings", api_settings_update)
+    app.router.add_post("/api/start", api_start)
+    app.router.add_post("/api/stop", api_stop)
+    app.router.add_post("/api/flash", api_flash)
+    app.router.add_post("/api/test-media-mix", api_test_media_mix)
+    app.router.add_post("/api/test-cozy-start", api_test_cozy_start)
+    app.router.add_post("/api/test-cozy-stop", api_test_cozy_stop)
+    app.router.add_get("/ws", websocket_handler)
+    app.router.add_get("/audio/{name}", audio)
+    app.router.add_get("/health", health)
+    app.router.add_static("/static/", WEB_DIR, show_index=False)
+
+    async def cleanup(app: web.Application) -> None:
+        await engine.shutdown()
+
+    app.on_cleanup.append(cleanup)
+    return app
+
+
+def main() -> None:
+    web.run_app(create_app(), host="0.0.0.0", port=8099, print=None)
+
+
+if __name__ == "__main__":
+    main()
